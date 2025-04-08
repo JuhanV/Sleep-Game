@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title></title>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Public+Sans:ital,wght@0,200;0,400;1,200;1,400&display=swap" rel="stylesheet">
+    <link rel="apple-touch-icon" sizes="180x180" href="https://static1.ouraring.com/web/favicons/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="https://static1.ouraring.com/web/favicons/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="https://static1.ouraring.com/web/favicons/favicon-16x16.png" />
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+      }
+
+      /* x-logo div/img classes */
+      .sc-dFRpbK {
+        text-align: center
+      }
+
+      .sc-csTbgd {
+        width: 256px;
+        height: 50px;
+        margin-top: 50px;
+        margin-bottom: 50px;
+      }
+
+      /* banner image */
+      .api-info::before {
+        position: relative;
+        top: -30px;
+        content: '';
+        background-image: url(/v2/static/img/OR_still_200_v002-cropped.jpg);
+        background-origin: content-box;
+        background-position: left center;
+        background-repeat: no-repeat;
+        background-size: 100% auto;
+        display: inline-block;
+        width: 100%;
+        height: 300px;
+      }
+
+      /* my applications sidebar link */
+      .my-applications {
+        padding: 12.5px 20px;
+        list-style-type: none;
+        font-size:  0.929em;
+      }
+
+      .my-applications a {
+        color: #151619;
+        text-decoration: none;
+      }
+
+      .my-applications a:hover {
+        color: #2f4a73;
+      }
+    </style>
+</head>
+<body>
+    <redoc spec-url="/v2/static/json/openapi-1.24.json"></redoc>
+    <script src="/v2/static/js/redoc.standalone.js"> </script>
+</body>
+</html>

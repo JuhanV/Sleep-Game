@@ -1,0 +1,13 @@
+# Core dependencies
+flask>=2.0.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+supabase>=1.0.0
+flask-login>=0.6.0
+cryptography>=41.0.0  # For Fernet encryption
+gunicorn>=20.1.0  # For production deployment
+
+# Development dependencies
+pytest>=7.4.0
+black>=23.7.0
+flake8>=6.1.0 
