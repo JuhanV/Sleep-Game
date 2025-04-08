@@ -78,7 +78,9 @@ def index():
     if current_user.is_authenticated:
         return redirect(url_for('dashboard'))
     
-    auth_url = f"{OURA_AUTH_URL}?client_id={OURA_CLIENT_ID}&redirect_uri={OURA_REDIRECT_URI}&response_type=code&scope=daily+personal+heartrate"
+    # Add email scope to ensure we can retrieve user information
+    scope = "daily+personal+heartrate+workout+session+tag+email"
+    auth_url = f"{OURA_AUTH_URL}?client_id={OURA_CLIENT_ID}&redirect_uri={OURA_REDIRECT_URI}&response_type=code&scope={scope}"
     return render_template_string('''
     <!DOCTYPE html>
     <html>
@@ -250,88 +252,157 @@ def dashboard():
         profile = current_user.profile_data
         
         # Get all profiles for leaderboard
-        leaderboard = supabase.table('profiles').select('*').order('avg_sleep_score', desc=True).execute()
+        try:
+            leaderboard_response = supabase.table('profiles').select('*').order('avg_sleep_score', desc=True).execute()
+            leaderboard = leaderboard_response.data if leaderboard_response.data else []
+        except Exception as e:
+            print(f"Error fetching leaderboard: {str(e)}")
+            flash("Error fetching leaderboard data.", "error")
+            leaderboard = []
         
         # Decrypt tokens
         tokens = decrypt_token(profile['oura_tokens'])
         if not tokens:
             logout_user()
+            flash("Session invalid or token decryption failed. Please log in again.", "error")
             return redirect(url_for('index'))
         
-        # Get sleep data from Oura (last 7 days)
-        start_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-        sleep_response = requests.get(
-            'https://api.ouraring.com/v2/usercollection/daily_sleep',
-            headers={'Authorization': f"Bearer {tokens['access_token']}"},
-            params={'start_date': start_date}
-        )
+        access_token = tokens.get('access_token')
+        if not access_token:
+            # Handle missing access token specifically
+            logout_user()
+            flash("Access token missing. Please log in again.", "error")
+            return redirect(url_for('index'))
         
-        # Log the raw response for debugging
-        print(f"Sleep API Raw Response Status: {sleep_response.status_code}")
-        print(f"Sleep API Raw Headers: {sleep_response.headers}")
+        # --- Define Date Range ---
+        start_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+        end_date = datetime.now().strftime('%Y-%m-%d')
+        
+        headers = {'Authorization': f"Bearer {access_token}"}
+        
+        # --- CORRECTED: Fetch V2 Daily Sleep Data ---
+        sleep_data = {"data": []}  # Default empty structure
+        sleep_url = 'https://api.ouraring.com/v2/usercollection/daily_sleep'
+        sleep_params = {'start_date': start_date, 'end_date': end_date}
+        print(f"Fetching V2 Daily Sleep from: {sleep_url} with params: {sleep_params}")
         
         try:
-            sleep_data = sleep_response.json()
-            print("Sleep API Response:", json.dumps(sleep_data, indent=2))  # Pretty print the JSON
-        except json.JSONDecodeError:
-            print("Failed to decode Sleep API JSON response")
-            print("Raw content:", sleep_response.text)
-            sleep_data = {"data": []}
+            sleep_response = requests.get(sleep_url, headers=headers, params=sleep_params)
+            print(f"V2 Daily Sleep Response Status: {sleep_response.status_code}")
+            
+            if sleep_response.status_code == 200:
+                sleep_data = sleep_response.json()
+                print("V2 Daily Sleep Response JSON:", json.dumps(sleep_data, indent=2))
+                if not sleep_data.get("data"):
+                    print("V2 Daily Sleep data array is empty.")
+                    # Generate placeholder data
+                    sleep_data = {"data": []}
+                    for i in range(7):
+                        day_date = (datetime.now() - timedelta(days=6-i)).strftime('%Y-%m-%d')
+                        sleep_data["data"].append({
+                            "day": day_date,
+                            "score": 0,
+                            "total_sleep_duration": 0,
+                            "deep_sleep_duration": 0,
+                            "rem_sleep_duration": 0,
+                            "light_sleep_duration": 0
+                        })
+            elif sleep_response.status_code in [401, 403]:
+                print("V2 Daily Sleep request failed with Auth error (401/403). Token might be expired or lack scope.")
+                flash("Authentication error fetching sleep data. Your session might have expired.", "error")
+            else:
+                # Handle other errors (404, 5xx, etc.)
+                print(f"V2 Daily Sleep request failed. Status: {sleep_response.status_code}, Response: {sleep_response.text}")
+                flash(f"Failed to fetch sleep data (Error {sleep_response.status_code}).", "error")
+                # Generate placeholder data
+                sleep_data = {"data": []}
+                for i in range(7):
+                    day_date = (datetime.now() - timedelta(days=6-i)).strftime('%Y-%m-%d')
+                    sleep_data["data"].append({
+                        "day": day_date,
+                        "score": 0,
+                        "total_sleep_duration": 0,
+                        "deep_sleep_duration": 0,
+                        "rem_sleep_duration": 0,
+                        "light_sleep_duration": 0
+                    })
         
-        # Process sleep data to calculate average
+        except requests.exceptions.RequestException as e:
+            print(f"Network error fetching V2 Daily Sleep: {str(e)}")
+            flash("Network error connecting to Oura API for sleep data.", "error")
+        except json.JSONDecodeError:
+            print(f"Failed to decode V2 Daily Sleep JSON response. Content: {sleep_response.text}")
+            flash("Invalid response received from Oura API for sleep data.", "error")
+        except Exception as e:  # Catch unexpected errors
+            print(f"Unexpected error fetching V2 Daily Sleep: {str(e)}")
+            flash("An unexpected error occurred while fetching sleep data.", "error")
+        
+        # --- Process Sleep Data (Calculate Average) ---
         sleep_scores = []
+        # Use the V2 structure directly: data is a list of daily summaries
         if sleep_data and 'data' in sleep_data:
             for day in sleep_data['data']:
-                if day.get('sleep_score'):
-                    sleep_scores.append(day.get('sleep_score'))
+                # V2 uses 'score', not 'sleep_score' directly in the summary object
+                if day.get('score') is not None:
+                    sleep_scores.append(day.get('score'))
+        else:
+            print("Sleep data structure missing 'data' key or is empty after fetch attempt.")
+        
+        # Sort sleep_data['data'] by day if needed for display
+        if sleep_data.get('data'):
+            sleep_data['data'].sort(key=lambda x: x.get('day', ''))
         
         avg_sleep_score = sum(sleep_scores) / len(sleep_scores) if sleep_scores else 0
+        last_sleep_score = sleep_scores[-1] if sleep_scores else None  # Get last score if sorted/relevant
         
         # Update profile with average sleep score
         try:
             supabase.table('profiles').update({
                 'avg_sleep_score': avg_sleep_score,
-                'last_sleep_score': sleep_scores[0] if sleep_scores else None
+                'last_sleep_score': last_sleep_score
             }).eq('id', current_user.id).execute()
         except Exception as e:
-            print(f"Error updating sleep scores: {str(e)}")
+            print(f"Error updating sleep scores in Supabase: {str(e)}")
         
-        # Get readiness data from Oura (last 7 days)
-        readiness_response = requests.get(
-            'https://api.ouraring.com/v2/usercollection/daily_readiness',
-            headers={'Authorization': f"Bearer {tokens['access_token']}"},
-            params={'start_date': start_date}
-        )
-        
-        # Log the raw response for debugging
-        print(f"Readiness API Raw Response Status: {readiness_response.status_code}")
+        # --- Fetch Readiness Data ---
+        readiness_data = {"data": []}
+        readiness_url = 'https://api.ouraring.com/v2/usercollection/daily_readiness'
+        readiness_params = {'start_date': start_date, 'end_date': end_date}
         
         try:
-            readiness_data = readiness_response.json()
-            print("Readiness API Response:", json.dumps(readiness_data, indent=2))  # Pretty print the JSON
-        except json.JSONDecodeError:
-            print("Failed to decode Readiness API JSON response")
-            print("Raw content:", readiness_response.text)
-            readiness_data = {"data": []}
+            readiness_response = requests.get(readiness_url, headers=headers, params=readiness_params)
+            print(f"Readiness API Response Status: {readiness_response.status_code}")
+            
+            if readiness_response.status_code == 200:
+                readiness_data = readiness_response.json()
+                print("Readiness API Response:", json.dumps(readiness_data, indent=2))
+            else:
+                print(f"Readiness API request failed. Status: {readiness_response.status_code}")
+                flash("Error fetching readiness data.", "error")
+        except Exception as e:
+            print(f"Error fetching Readiness data: {str(e)}")
+            flash("Error fetching readiness data.", "error")
         
-        # Get activity data from Oura (last 7 days)
-        activity_response = requests.get(
-            'https://api.ouraring.com/v2/usercollection/daily_activity',
-            headers={'Authorization': f"Bearer {tokens['access_token']}"},
-            params={'start_date': start_date}
-        )
-        
-        # Log the raw response for debugging
-        print(f"Activity API Raw Response Status: {activity_response.status_code}")
+        # --- Fetch Activity Data ---
+        activity_data = {"data": []}
+        activity_url = 'https://api.ouraring.com/v2/usercollection/daily_activity'
+        activity_params = {'start_date': start_date, 'end_date': end_date}
         
         try:
-            activity_data = activity_response.json()
-            print("Activity API Response:", json.dumps(activity_data, indent=2))  # Pretty print the JSON
-        except json.JSONDecodeError:
-            print("Failed to decode Activity API JSON response")
-            print("Raw content:", activity_response.text)
-            activity_data = {"data": []}
-        
+            activity_response = requests.get(activity_url, headers=headers, params=activity_params)
+            print(f"Activity API Response Status: {activity_response.status_code}")
+            
+            if activity_response.status_code == 200:
+                activity_data = activity_response.json()
+                print("Activity API Response:", json.dumps(activity_data, indent=2))
+            else:
+                print(f"Activity API request failed. Status: {activity_response.status_code}")
+                flash("Error fetching activity data.", "error")
+        except Exception as e:
+            print(f"Error fetching Activity data: {str(e)}")
+            flash("Error fetching activity data.", "error")
+
+        # Update the template to use the correct field names from V2 API
         return render_template_string('''
 <!DOCTYPE html>
 <html>
@@ -515,62 +586,190 @@ def dashboard():
                 {% for day in sleep_data.get('data', []) %}
                 <div class="card">
                     <h3>{{ day.get('day', 'Unknown Date') }}</h3>
-                    <div class="score sleep-score">{{ day.get('sleep_score', 'N/A') }}</div>
+                    <div class="score sleep-score">{{ day.get('score', 'N/A') }}</div>
                     <div class="progress-bar">
-                        <div class="progress sleep-progress" data-width="{{ day.get('sleep_score', 0) or 0 }}" style="width: 0%"></div>
+                        <div class="progress sleep-progress" data-width="{{ day.get('score', 0) or 0 }}" style="width: 0%"></div>
                     </div>
-                    {% if day.get('total_sleep_duration') %}
-                    <p>Total Sleep: {{ day.get('total_sleep_duration') // 60 }} hours {{ day.get('total_sleep_duration') % 60 }} minutes</p>
-                    {% else %}
-                    <p>Total Sleep: N/A</p>
-                    {% endif %}
                     
-                    {% if day.get('deep_sleep_duration') or day.get('rem_sleep_duration') or day.get('light_sleep_duration') %}
+                    <div style="margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px;">
+                        <h4>Sleep Details</h4>
+                        <ul style="padding-left: 0; list-style-type: none;">
+                            <li style="margin-bottom: 5px;"><strong>Score:</strong> {{ day.get('score', 'N/A') }}</li>
+                            {% if day.get('efficiency') is not none %}
+                            <li style="margin-bottom: 5px;"><strong>Efficiency:</strong> {{ day.get('efficiency') }}%</li>
+                            {% endif %}
+                            {% if day.get('total_sleep_duration') is not none %}
+                            <li style="margin-bottom: 5px;"><strong>Total Sleep:</strong> {% if day.get('total_sleep_duration') > 0 %}{{ day.get('total_sleep_duration') // 60 }} hours {{ day.get('total_sleep_duration') % 60 }} minutes{% else %}<span style="color: #999;">No data available</span>{% endif %}</li>
+                            {% endif %}
+                            {% if day.get('sleep_phase_durations') is not none and day.get('sleep_phase_durations').get('awake') is not none %}
+                            <li style="margin-bottom: 5px;"><strong>Awake Time:</strong> {{ day.get('sleep_phase_durations', {}).get('awake', 0) // 60 }} min {{ day.get('sleep_phase_durations', {}).get('awake', 0) % 60 }} sec</li>
+                            {% endif %}
+                            {% if day.get('latency') is not none %}
+                            <li style="margin-bottom: 5px;"><strong>Sleep Latency:</strong> {% if day.get('latency') > 0 %}{{ day.get('latency') // 60 }} min {{ day.get('latency') % 60 }} sec{% else %}<span style="color: #999;">No data available</span>{% endif %}</li>
+                            {% endif %}
+                            {% if day.get('sleep_phase_count') is not none %}
+                            <li style="margin-bottom: 5px;"><strong>Sleep Cycles:</strong> {{ day.get('sleep_phase_count') }}</li>
+                            {% endif %}
+                            {% if day.get('restless_periods') is not none %}
+                            <li style="margin-bottom: 5px;"><strong>Restless Periods:</strong> {{ day.get('restless_periods') }}</li>
+                            {% endif %}
+                            {% if day.get('sleep_score_delta') is not none %}
+                            <li style="margin-bottom: 5px;"><strong>Score Change:</strong> {{ day.get('sleep_score_delta') }}</li>
+                            {% endif %}
+                        </ul>
+                    </div>
+                    
+                    {% if day.get('deep_sleep_duration') or day.get('rem_sleep_duration') or day.get('light_sleep_duration') or day.get('sleep_phase_durations') %}
                     <div style="margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px;">
                         <h4>Sleep Stages</h4>
-                        {% if day.get('deep_sleep_duration') %}
-                        <p>Deep Sleep: {{ day.get('deep_sleep_duration') // 60 }} hours {{ day.get('deep_sleep_duration') % 60 }} minutes</p>
-                        {% endif %}
-                        
-                        {% if day.get('rem_sleep_duration') %}
-                        <p>REM Sleep: {{ day.get('rem_sleep_duration') // 60 }} hours {{ day.get('rem_sleep_duration') % 60 }} minutes</p>
-                        {% endif %}
-                        
-                        {% if day.get('light_sleep_duration') %}
-                        <p>Light Sleep: {{ day.get('light_sleep_duration') // 60 }} hours {{ day.get('light_sleep_duration') % 60 }} minutes</p>
+                        <ul style="padding-left: 0; list-style-type: none;">
+                            {% if day.get('deep_sleep_duration') %}
+                            <li style="margin-bottom: 5px;"><strong>Deep Sleep:</strong> {{ day.get('deep_sleep_duration') // 60 }} hours {{ day.get('deep_sleep_duration') % 60 }} minutes</li>
+                            {% elif day.get('sleep_phase_durations', {}).get('deep') %}
+                            <li style="margin-bottom: 5px;"><strong>Deep Sleep:</strong> {{ day.get('sleep_phase_durations', {}).get('deep', 0) // 60 }} min {{ day.get('sleep_phase_durations', {}).get('deep', 0) % 60 }} sec</li>
+                            {% endif %}
+                            
+                            {% if day.get('rem_sleep_duration') %}
+                            <li style="margin-bottom: 5px;"><strong>REM Sleep:</strong> {{ day.get('rem_sleep_duration') // 60 }} hours {{ day.get('rem_sleep_duration') % 60 }} minutes</li>
+                            {% elif day.get('sleep_phase_durations', {}).get('rem') %}
+                            <li style="margin-bottom: 5px;"><strong>REM Sleep:</strong> {{ day.get('sleep_phase_durations', {}).get('rem', 0) // 60 }} min {{ day.get('sleep_phase_durations', {}).get('rem', 0) % 60 }} sec</li>
+                            {% endif %}
+                            
+                            {% if day.get('light_sleep_duration') %}
+                            <li style="margin-bottom: 5px;"><strong>Light Sleep:</strong> {{ day.get('light_sleep_duration') // 60 }} hours {{ day.get('light_sleep_duration') % 60 }} minutes</li>
+                            {% elif day.get('sleep_phase_durations', {}).get('light') %}
+                            <li style="margin-bottom: 5px;"><strong>Light Sleep:</strong> {{ day.get('sleep_phase_durations', {}).get('light', 0) // 60 }} min {{ day.get('sleep_phase_durations', {}).get('light', 0) % 60 }} sec</li>
+                            {% endif %}
+                            
+                            {% if day.get('awake_duration') %}
+                            <li style="margin-bottom: 5px;"><strong>Time Awake:</strong> {{ day.get('awake_duration') // 60 }} hours {{ day.get('awake_duration') % 60 }} minutes</li>
+                            {% endif %}
+                            
+                            {% if day.get('sleep_phase_durations', {}).get('out') is not none %}
+                            <li style="margin-bottom: 5px;"><strong>Out of Bed:</strong> {{ day.get('sleep_phase_durations', {}).get('out', 0) // 60 }} min {{ day.get('sleep_phase_durations', {}).get('out', 0) % 60 }} sec</li>
+                            {% endif %}
+                        </ul>
+
+                        {% if day.get('sleep_phase_percentage') %}
+                        <div style="margin-top: 10px;">
+                            <h5>Sleep Composition</h5>
+                            <div style="display: flex; height: 20px; border-radius: 3px; overflow: hidden;">
+                                {% if day.get('sleep_phase_percentage', {}).get('deep') %}
+                                <div style="background: #1E88E5; width: {{ day.get('sleep_phase_percentage', {}).get('deep', 0) }}%; display: flex; justify-content: center; align-items: center; color: white; font-size: 10px;">{{ day.get('sleep_phase_percentage', {}).get('deep', 0) }}%</div>
+                                {% endif %}
+                                {% if day.get('sleep_phase_percentage', {}).get('rem') %}
+                                <div style="background: #43A047; width: {{ day.get('sleep_phase_percentage', {}).get('rem', 0) }}%; display: flex; justify-content: center; align-items: center; color: white; font-size: 10px;">{{ day.get('sleep_phase_percentage', {}).get('rem', 0) }}%</div>
+                                {% endif %}
+                                {% if day.get('sleep_phase_percentage', {}).get('light') %}
+                                <div style="background: #7CB342; width: {{ day.get('sleep_phase_percentage', {}).get('light', 0) }}%; display: flex; justify-content: center; align-items: center; color: white; font-size: 10px;">{{ day.get('sleep_phase_percentage', {}).get('light', 0) }}%</div>
+                                {% endif %}
+                                {% if day.get('sleep_phase_percentage', {}).get('awake') %}
+                                <div style="background: #FFB300; width: {{ day.get('sleep_phase_percentage', {}).get('awake', 0) }}%; display: flex; justify-content: center; align-items: center; color: white; font-size: 10px;">{{ day.get('sleep_phase_percentage', {}).get('awake', 0) }}%</div>
+                                {% endif %}
+                            </div>
+                            <div style="display: flex; justify-content: space-between; font-size: 10px; margin-top: 3px;">
+                                <span style="color: #1E88E5;">Deep</span>
+                                <span style="color: #43A047;">REM</span>
+                                <span style="color: #7CB342;">Light</span>
+                                <span style="color: #FFB300;">Awake</span>
+                            </div>
+                        </div>
                         {% endif %}
                     </div>
                     {% endif %}
                     
-                    {% if day.get('average_heart_rate') or day.get('lowest_heart_rate') or day.get('average_hrv') %}
+                    {% if day.get('average_heart_rate') or day.get('lowest_heart_rate') or day.get('average_hrv') or day.get('temperature_delta') or day.get('breathing_variations') %}
                     <div style="margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px;">
                         <h4>Biometrics</h4>
-                        {% if day.get('average_heart_rate') %}
-                        <p>Average HR: {{ day.get('average_heart_rate') }} bpm</p>
-                        {% endif %}
-                        
-                        {% if day.get('lowest_heart_rate') %}
-                        <p>Lowest HR: {{ day.get('lowest_heart_rate') }} bpm</p>
-                        {% endif %}
-                        
-                        {% if day.get('average_hrv') %}
-                        <p>Average HRV: {{ day.get('average_hrv') }} ms</p>
-                        {% endif %}
-                        
-                        {% if day.get('average_breath') %}
-                        <p>Respiratory Rate: {{ day.get('average_breath') }} breaths/min</p>
-                        {% endif %}
+                        <ul style="padding-left: 0; list-style-type: none;">
+                            {% if day.get('average_heart_rate') %}
+                            <li style="margin-bottom: 5px;"><strong>Average HR:</strong> {{ day.get('average_heart_rate') }} bpm</li>
+                            {% endif %}
+                            
+                            {% if day.get('lowest_heart_rate') %}
+                            <li style="margin-bottom: 5px;"><strong>Lowest HR:</strong> {{ day.get('lowest_heart_rate') }} bpm</li>
+                            {% endif %}
+                            
+                            {% if day.get('average_hrv') %}
+                            <li style="margin-bottom: 5px;"><strong>Average HRV:</strong> {{ day.get('average_hrv') }} ms</li>
+                            {% endif %}
+                            
+                            {% if day.get('average_breath') %}
+                            <li style="margin-bottom: 5px;"><strong>Respiratory Rate:</strong> {{ day.get('average_breath') }} breaths/min</li>
+                            {% endif %}
+                            
+                            {% if day.get('temperature_delta') %}
+                            <li style="margin-bottom: 5px;"><strong>Temperature Deviation:</strong> {{ "%.2f"|format(day.get('temperature_delta')) }} °C</li>
+                            {% endif %}
+                            
+                            {% if day.get('breathing_variations') %}
+                            <li style="margin-bottom: 5px;"><strong>Breathing Variations:</strong> {{ day.get('breathing_variations') }}</li>
+                            {% endif %}
+                            
+                            {% if day.get('heart_rate_variability') %}
+                            <li style="margin-bottom: 5px;"><strong>HRV Trend:</strong> {{ day.get('heart_rate_variability') }}</li>
+                            {% endif %}
+                        </ul>
                     </div>
                     {% endif %}
                     
-                    {% if day.get('bedtime_start') and day.get('bedtime_end') %}
+                    {% if day.get('bedtime_start') or day.get('bedtime_end') %}
                     <div style="margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px;">
                         <h4>Sleep Timing</h4>
-                        <p>Bedtime: {{ day.get('bedtime_start').split('T')[1][:5] }}</p>
-                        <p>Wake-up: {{ day.get('bedtime_end').split('T')[1][:5] }}</p>
-                        {% if day.get('latency') %}
-                        <p>Sleep Latency: {{ day.get('latency') // 60 }} min {{ day.get('latency') % 60 }} sec</p>
-                        {% endif %}
+                        <ul style="padding-left: 0; list-style-type: none;">
+                            {% if day.get('bedtime_start') %}
+                            <li style="margin-bottom: 5px;"><strong>Bedtime:</strong> {{ day.get('bedtime_start').split('T')[1][:5] }}</li>
+                            {% endif %}
+                            
+                            {% if day.get('bedtime_end') %}
+                            <li style="margin-bottom: 5px;"><strong>Wake-up:</strong> {{ day.get('bedtime_end').split('T')[1][:5] }}</li>
+                            {% endif %}
+                            
+                            {% if day.get('bedtime_start') and day.get('bedtime_end') %}
+                                {% set start = day.get('bedtime_start').split('T')[1][:5] %}
+                                {% set end = day.get('bedtime_end').split('T')[1][:5] %}
+                                <li style="margin-bottom: 5px;"><strong>Time in Bed:</strong> {{ ((day.get('total_sleep_duration', 0) + day.get('awake_duration', 0))) // 60 }} hours {{ ((day.get('total_sleep_duration', 0) + day.get('awake_duration', 0))) % 60 }} minutes</li>
+                            {% endif %}
+                            
+                            {% if day.get('midpoint_time') %}
+                            <li style="margin-bottom: 5px;"><strong>Midpoint of Sleep:</strong> {{ day.get('midpoint_time').split('T')[1][:5] }}</li>
+                            {% endif %}
+                            
+                            {% if day.get('onset_latency') %}
+                            <li style="margin-bottom: 5px;"><strong>Time to Fall Asleep:</strong> {{ day.get('onset_latency') // 60 }} min {{ day.get('onset_latency') % 60 }} sec</li>
+                            {% endif %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                    
+                    {% if day.get('tags') or day.get('contributors') %}
+                    <div style="margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px;">
+                        <h4>Analysis</h4>
+                        <ul style="padding-left: 0; list-style-type: none;">
+                            {% if day.get('contributors', {}).get('deep_sleep') %}
+                            <li style="margin-bottom: 5px;"><strong>Deep Sleep Quality:</strong> {{ day.get('contributors', {}).get('deep_sleep') }}/100</li>
+                            {% endif %}
+                            
+                            {% if day.get('contributors', {}).get('rem_sleep') %}
+                            <li style="margin-bottom: 5px;"><strong>REM Sleep Quality:</strong> {{ day.get('contributors', {}).get('rem_sleep') }}/100</li>
+                            {% endif %}
+                            
+                            {% if day.get('contributors', {}).get('efficiency') %}
+                            <li style="margin-bottom: 5px;"><strong>Sleep Efficiency:</strong> {{ day.get('contributors', {}).get('efficiency') }}/100</li>
+                            {% endif %}
+                            
+                            {% if day.get('contributors', {}).get('latency') %}
+                            <li style="margin-bottom: 5px;"><strong>Sleep Onset:</strong> {{ day.get('contributors', {}).get('latency') }}/100</li>
+                            {% endif %}
+                            
+                            {% if day.get('contributors', {}).get('timing') %}
+                            <li style="margin-bottom: 5px;"><strong>Sleep Timing:</strong> {{ day.get('contributors', {}).get('timing') }}/100</li>
+                            {% endif %}
+                            
+                            {% if day.get('sleep_algorithm_version') %}
+                            <li style="margin-bottom: 5px;"><strong>Algorithm Version:</strong> {{ day.get('sleep_algorithm_version') }}</li>
+                            {% endif %}
+                        </ul>
                     </div>
                     {% endif %}
                 </div>
@@ -594,29 +793,39 @@ def dashboard():
                     {% if day.get('contributors') %}
                     <div style="margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px;">
                         <h4>Contributors</h4>
-                        {% if day.get('contributors', {}).get('sleep_balance') %}
-                        <p>Sleep Balance: {{ day.get('contributors', {}).get('sleep_balance') }}</p>
-                        {% endif %}
-                        
-                        {% if day.get('contributors', {}).get('hrv_balance') %}
-                        <p>HRV Balance: {{ day.get('contributors', {}).get('hrv_balance') }}</p>
-                        {% endif %}
-                        
-                        {% if day.get('contributors', {}).get('activity_balance') %}
-                        <p>Activity Balance: {{ day.get('contributors', {}).get('activity_balance') }}</p>
-                        {% endif %}
-                        
-                        {% if day.get('contributors', {}).get('recovery_index') %}
-                        <p>Recovery Index: {{ day.get('contributors', {}).get('recovery_index') }}</p>
-                        {% endif %}
-                        
-                        {% if day.get('contributors', {}).get('body_temperature') %}
-                        <p>Body Temperature: {{ day.get('contributors', {}).get('body_temperature') }}</p>
-                        {% endif %}
-                        
-                        {% if day.get('contributors', {}).get('resting_heart_rate') %}
-                        <p>Resting Heart Rate: {{ day.get('contributors', {}).get('resting_heart_rate') }}</p>
-                        {% endif %}
+                        <ul style="padding-left: 0; list-style-type: none;">
+                            {% if day.get('contributors', {}).get('sleep_balance') %}
+                            <li style="margin-bottom: 5px;">Sleep Balance: {{ day.get('contributors', {}).get('sleep_balance') }}</li>
+                            {% endif %}
+                            
+                            {% if day.get('contributors', {}).get('hrv_balance') %}
+                            <li style="margin-bottom: 5px;">HRV Balance: {{ day.get('contributors', {}).get('hrv_balance') }}</li>
+                            {% endif %}
+                            
+                            {% if day.get('contributors', {}).get('activity_balance') %}
+                            <li style="margin-bottom: 5px;">Activity Balance: {{ day.get('contributors', {}).get('activity_balance') }}</li>
+                            {% endif %}
+                            
+                            {% if day.get('contributors', {}).get('recovery_index') %}
+                            <li style="margin-bottom: 5px;">Recovery Index: {{ day.get('contributors', {}).get('recovery_index') }}</li>
+                            {% endif %}
+                            
+                            {% if day.get('contributors', {}).get('body_temperature') %}
+                            <li style="margin-bottom: 5px;">Body Temperature: {{ day.get('contributors', {}).get('body_temperature') }}</li>
+                            {% endif %}
+                            
+                            {% if day.get('contributors', {}).get('resting_heart_rate') %}
+                            <li style="margin-bottom: 5px;">Resting Heart Rate: {{ day.get('contributors', {}).get('resting_heart_rate') }}</li>
+                            {% endif %}
+                            
+                            {% if day.get('contributors', {}).get('previous_day_activity') %}
+                            <li style="margin-bottom: 5px;">Previous Day Activity: {{ day.get('contributors', {}).get('previous_day_activity') }}</li>
+                            {% endif %}
+                            
+                            {% if day.get('contributors', {}).get('previous_night') %}
+                            <li style="margin-bottom: 5px;">Previous Night: {{ day.get('contributors', {}).get('previous_night') }}</li>
+                            {% endif %}
+                        </ul>
                     </div>
                     {% endif %}
                 </div>
@@ -674,8 +883,11 @@ def dashboard():
         ''', profile=profile, sleep_data=sleep_data, readiness_data=readiness_data, activity_data=activity_data, leaderboard=leaderboard)
 
     except Exception as e:
-        print(f"Error in dashboard: {str(e)}")
-        return f"An error occurred: {str(e)}", 500
+        print(f"Unhandled Error in dashboard route: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        flash(f"An unexpected error occurred in the dashboard: {str(e)}", "error")
+        return redirect(url_for('index'))
 
 @app.route('/add_friend', methods=['POST'])
 @login_required
@@ -745,6 +957,108 @@ def logout():
     logout_user()
     session.clear()
     return redirect(url_for('index'))
+
+@app.route('/debug_data')
+@login_required
+def debug_data():
+    """Debug endpoint to check raw Oura API responses."""
+    try:
+        # Get user's profile data
+        profile = current_user.profile_data
+        
+        # Decrypt tokens
+        tokens = decrypt_token(profile['oura_tokens'])
+        if not tokens:
+            return "Failed to decrypt tokens", 500
+            
+        # Check token status
+        token_info = {
+            "access_token_exists": bool(tokens.get('access_token')),
+            "refresh_token_exists": bool(tokens.get('refresh_token')),
+            "token_type": tokens.get('token_type'),
+            "expires_in": tokens.get('expires_in')
+        }
+        
+        # Get dates for testing
+        start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        end_date = datetime.now().strftime('%Y-%m-%d')
+        
+        # Test all endpoints
+        endpoints = [
+            # v1 endpoints
+            {'name': 'v1_sleep', 'url': 'https://api.ouraring.com/v1/sleep', 'params': {'start': start_date, 'end': end_date}},
+            
+            # v2 endpoints
+            {'name': 'v2_daily_sleep', 'url': 'https://api.ouraring.com/v2/usercollection/daily_sleep', 'params': {'start_date': start_date, 'end_date': end_date}},
+            {'name': 'v2_daily_readiness', 'url': 'https://api.ouraring.com/v2/usercollection/daily_readiness', 'params': {'start_date': start_date, 'end_date': end_date}},
+        ]
+        
+        results = {}
+        for endpoint in endpoints:
+            try:
+                response = requests.get(
+                    endpoint['url'],
+                    headers={'Authorization': f"Bearer {tokens['access_token']}"},
+                    params=endpoint['params']
+                )
+                results[endpoint['name']] = {
+                    'status_code': response.status_code,
+                    'url': response.url
+                }
+                if response.status_code == 200:
+                    data = response.json()
+                    results[endpoint['name']]['response'] = data
+                else:
+                    results[endpoint['name']]['response'] = response.text
+            except Exception as e:
+                results[endpoint['name']]['error'] = str(e)
+        
+        return render_template_string('''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Oura API Debug</title>
+            <style>
+                body { font-family: monospace; margin: 20px; }
+                .endpoint { margin-bottom: 30px; border: 1px solid #ddd; padding: 15px; border-radius: 5px; }
+                h2 { margin-top: 0; }
+                pre { background: #f5f5f5; padding: 10px; overflow-x: auto; max-height: 500px; }
+                .success { color: green; }
+                .error { color: red; }
+            </style>
+        </head>
+        <body>
+            <h1>Oura API Debug</h1>
+            
+            <div class="endpoint">
+                <h2>Token Status</h2>
+                <pre>{{ token_info | tojson(indent=2) }}</pre>
+            </div>
+            
+            {% for name, result in results.items() %}
+            <div class="endpoint">
+                <h2>{{ name }}</h2>
+                <p>URL: {{ result.url }}</p>
+                <p class="{{ 'success' if result.status_code == 200 else 'error' }}">
+                    Status: {{ result.status_code }}
+                </p>
+                {% if result.get('error') %}
+                <p class="error">Error: {{ result.error }}</p>
+                {% else %}
+                <pre>{{ result.response | tojson(indent=2) }}</pre>
+                {% endif %}
+            </div>
+            {% endfor %}
+            
+            <div style="margin-top: 30px;">
+                <a href="{{ url_for('dashboard') }}">Return to Dashboard</a>
+            </div>
+        </body>
+        </html>
+        ''', token_info=token_info, results=results)
+        
+    except Exception as e:
+        return f"An error occurred: {str(e)}", 500
 
 if __name__ == '__main__':
     app.run(debug=True) 
