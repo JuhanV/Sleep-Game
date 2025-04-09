@@ -97,32 +97,48 @@ def encrypt_token(token):
     """Encrypt token using Fernet."""
     return cipher_suite.encrypt(json.dumps(token).encode()).decode()
 
-def decrypt_token(encrypted_token):
-    """Decrypt token using Fernet."""
+def decrypt_token(encrypted_token_str):
+    """Decrypt an encrypted token string."""
     try:
-        print(f"decrypt_token: Starting decryption of token: {encrypted_token[:10]}...")
-        if not encrypted_token:
-            print("decrypt_token: Token is empty or None")
+        print(f"decrypt_token: Starting decryption of token (length: {len(encrypted_token_str) if encrypted_token_str else 0})")
+        
+        if not encrypted_token_str:
+            print("decrypt_token: Empty token string provided")
             return None
             
-        # Convert string to bytes if needed
-        token_bytes = encrypted_token.encode() if isinstance(encrypted_token, str) else encrypted_token
-        print("decrypt_token: Token converted to bytes successfully")
+        # Convert to bytes if it's a string
+        if isinstance(encrypted_token_str, str):
+            print("decrypt_token: Converting string token to bytes")
+            try:
+                # First try UTF-8 encoding
+                token_bytes = encrypted_token_str.encode('utf-8')
+            except UnicodeEncodeError:
+                print("decrypt_token: UTF-8 encoding failed, trying latin-1")
+                token_bytes = encrypted_token_str.encode('latin-1')
+        else:
+            token_bytes = encrypted_token_str
+            
+        print(f"decrypt_token: Token bytes length: {len(token_bytes)}")
         
-        # Attempt decryption
-        decrypted_data = cipher_suite.decrypt(token_bytes)
-        print("decrypt_token: Token decrypted successfully")
+        # Initialize Fernet with the key
+        f = Fernet(fernet_key)
         
-        # Parse JSON
-        token_dict = json.loads(decrypted_data.decode())
-        print("decrypt_token: JSON parsed successfully")
+        # Decrypt the token
+        print("decrypt_token: Attempting decryption")
+        decrypted_token = f.decrypt(token_bytes)
+        print("decrypt_token: Decryption successful")
         
-        return token_dict
+        # Parse the JSON
+        print("decrypt_token: Parsing JSON")
+        tokens = json.loads(decrypted_token)
+        print("decrypt_token: JSON parsing successful")
+        
+        return tokens
     except Exception as e:
-        print(f"decrypt_token: Error details: {str(e)}")
+        print(f"decrypt_token: Error during decryption: {str(e)}")
         print(f"decrypt_token: Error type: {type(e).__name__}")
         import traceback
-        print(f"decrypt_token: Traceback:\n{traceback.format_exc()}")
+        print(f"decrypt_token: Traceback: {traceback.format_exc()}")
         return None
 
 @app.route('/')
@@ -1283,199 +1299,45 @@ def view_user_data(user_id):
             flash("User profile is missing Oura token data.", "error")
             return redirect(url_for('admin_dashboard'))
 
-        # Check token format
+        # Try to decrypt the token directly first
         try:
-            # Attempt to decode as base64 to verify format
-            base64.b64decode(encrypted_token_str)
-            print("view_user_data: Token appears to be valid base64")
+            tokens = decrypt_token(encrypted_token_str)
+            if tokens:
+                print("view_user_data: Successfully decrypted token directly")
+                return render_template('admin/user_data.html', 
+                                    user=profile,
+                                    sleep_data=sleep_data,
+                                    readiness_data=readiness_data,
+                                    activity_data=activity_data)
         except Exception as e:
-            print(f"view_user_data: Token is not valid base64: {str(e)}")
-            flash("Token format is invalid.", "error")
-            return redirect(url_for('admin_dashboard'))
+            print(f"view_user_data: Direct decryption failed: {str(e)}")
+            print(f"view_user_data: Error type: {type(e).__name__}")
+            import traceback
+            print(f"view_user_data: Traceback: {traceback.format_exc()}")
 
-        tokens = decrypt_token(encrypted_token_str)
-        if not tokens:
-            print(f"view_user_data: Token decryption failed for {profile.get('display_name')}. Redirecting.")
-            flash("Unable to decrypt user's Oura tokens.", "error")
-            return redirect(url_for('admin_dashboard'))
+        # If direct decryption fails, try to handle the token format
+        try:
+            # Remove any potential padding or extra characters
+            clean_token = encrypted_token_str.strip()
+            print(f"view_user_data: Cleaned token: {clean_token[:30]}...")
+            
+            # Try to decrypt the cleaned token
+            tokens = decrypt_token(clean_token)
+            if tokens:
+                print("view_user_data: Successfully decrypted cleaned token")
+                return render_template('admin/user_data.html', 
+                                    user=profile,
+                                    sleep_data=sleep_data,
+                                    readiness_data=readiness_data,
+                                    activity_data=activity_data)
+        except Exception as e:
+            print(f"view_user_data: Cleaned token decryption failed: {str(e)}")
+            print(f"view_user_data: Error type: {type(e).__name__}")
+            print(f"view_user_data: Traceback: {traceback.format_exc()}")
 
-        print(f"view_user_data: Tokens decrypted successfully for {profile.get('display_name')}")
-        # Check 4: Is access token present?
-        access_token = tokens.get('access_token')
-        if not access_token:
-            print(f"view_user_data: Access token missing after decryption for {profile.get('display_name')}. Redirecting.")
-            flash("User's access token is missing.", "error")
-            return redirect(url_for('admin_dashboard'))
-
-        print(f"view_user_data: Access token found for {profile.get('display_name')}. Fetching Oura data...")
-        
-        # Fetch sleep data
-        print("view_user_data: Fetching sleep data...")
-        sleep_response = requests.get(
-            'https://api.ouraring.com/v2/usercollection/daily_sleep',
-            params={'start_date': (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')},
-            headers={'Authorization': f'Bearer {access_token}'}
-        )
-        if not sleep_response.ok:
-            print(f"view_user_data: Sleep data fetch failed with status {sleep_response.status_code}")
-            print(f"Response: {sleep_response.text}")
-            raise Exception(f"Failed to fetch sleep data: {sleep_response.text}")
-        sleep_data = sleep_response.json()
-        print("view_user_data: Sleep data fetched successfully")
-
-        # Fetch readiness data
-        print("view_user_data: Fetching readiness data...")
-        readiness_response = requests.get(
-            'https://api.ouraring.com/v2/usercollection/daily_readiness',
-            params={'start_date': (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')},
-            headers={'Authorization': f'Bearer {access_token}'}
-        )
-        if not readiness_response.ok:
-            print(f"view_user_data: Readiness data fetch failed with status {readiness_response.status_code}")
-            print(f"Response: {readiness_response.text}")
-            raise Exception(f"Failed to fetch readiness data: {readiness_response.text}")
-        readiness_data = readiness_response.json()
-        print("view_user_data: Readiness data fetched successfully")
-
-        print(f"view_user_data: All data fetched. Rendering template for {profile.get('display_name')}")
-        return render_template_string('''
-<!DOCTYPE html>
-<html>
-<head>
-    <title>User Data - {{ profile.display_name }}</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }
-        .card {
-            background: white;
-            border-radius: 8px;
-            padding: 20px;
-            margin-bottom: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 20px;
-        }
-        .header select {
-            padding: 8px;
-            border-radius: 4px;
-            border: 1px solid #ddd;
-        }
-        .nav {
-            margin-bottom: 20px;
-        }
-        .nav a {
-            color: #666;
-            text-decoration: none;
-            margin-right: 15px;
-        }
-        .nav a:hover {
-            color: #333;
-        }
-        .data-section {
-            margin-bottom: 30px;
-        }
-        .score {
-            font-size: 24px;
-            font-weight: bold;
-            color: #4CAF50;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 10px;
-        }
-        th, td {
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid #ddd;
-        }
-        th {
-            background-color: #f8f9fa;
-        }
-        tr:hover {
-            background-color: #f5f5f5;
-        }
-    </style>
-</head>
-<body>
-    <div class="card">
-        <div class="nav">
-            <a href="{{ url_for('admin_dashboard') }}">← Back to Admin Dashboard</a>
-            <a href="{{ url_for('dashboard') }}">My Dashboard</a>
-            <a href="{{ url_for('logout') }}">Logout</a>
-        </div>
-        
-        <div class="header">
-            <h1>User Data: {{ profile.display_name }}</h1>
-            <select onchange="window.location.href=this.value">
-                {% for p in all_profiles %}
-                <option value="{{ url_for('view_user_data', user_id=p.id) }}" 
-                        {% if p.id == profile.id %}selected{% endif %}>
-                    {{ p.display_name }}
-                </option>
-                {% endfor %}
-            </select>
-        </div>
-
-        <div class="data-section">
-            <h2>Sleep Data</h2>
-            <table>
-                <tr>
-                    <th>Date</th>
-                    <th>Score</th>
-                    <th>Total Sleep</th>
-                    <th>Deep Sleep</th>
-                    <th>REM Sleep</th>
-                    <th>Light Sleep</th>
-                </tr>
-                {% for day in sleep_data.data %}
-                <tr>
-                    <td>{{ day.day }}</td>
-                    <td class="score">{{ "%.1f"|format(day.score or 0) }}</td>
-                    <td>{{ "%.1f"|format((day.total_sleep_duration or 0) / 3600) }}h</td>
-                    <td>{{ "%.1f"|format((day.deep_sleep_duration or 0) / 3600) }}h</td>
-                    <td>{{ "%.1f"|format((day.rem_sleep_duration or 0) / 3600) }}h</td>
-                    <td>{{ "%.1f"|format((day.light_sleep_duration or 0) / 3600) }}h</td>
-                </tr>
-                {% endfor %}
-            </table>
-        </div>
-
-        <div class="data-section">
-            <h2>Readiness Data</h2>
-            <table>
-                <tr>
-                    <th>Date</th>
-                    <th>Score</th>
-                    <th>Previous Night Score</th>
-                    <th>Activity Balance</th>
-                    <th>Body Temperature</th>
-                    <th>HRV Balance</th>
-                </tr>
-                {% for day in readiness_data.data %}
-                <tr>
-                    <td>{{ day.day }}</td>
-                    <td class="score">{{ "%.1f"|format(day.score or 0) }}</td>
-                    <td>{{ "%.1f"|format(day.previous_night_score or 0) }}</td>
-                    <td>{{ "%.1f"|format(day.activity_balance or 0) }}</td>
-                    <td>{{ "%.1f"|format(day.temperature_deviation or 0) }}</td>
-                    <td>{{ "%.1f"|format(day.hrv_balance or 0) }}</td>
-                </tr>
-                {% endfor %}
-            </table>
-        </div>
-    </div>
-</body>
-</html>
-        ''', profile=profile, all_profiles=all_profiles, sleep_data=sleep_data, readiness_data=readiness_data)
+        print(f"view_user_data: All decryption attempts failed for {profile.get('display_name')}. Redirecting.")
+        flash("Unable to decrypt user's Oura tokens.", "error")
+        return redirect(url_for('admin_dashboard'))
 
     except Exception as e:
         print(f"Error in view_user_data for user {user_id}: {str(e)}")

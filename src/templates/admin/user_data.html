@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>User Data - {{ user.display_name }}</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .header select {
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+        .nav {
+            margin-bottom: 20px;
+        }
+        .nav a {
+            color: #666;
+            text-decoration: none;
+            margin-right: 15px;
+        }
+        .nav a:hover {
+            color: #333;
+        }
+        .data-section {
+            margin-bottom: 30px;
+        }
+        h2 {
+            font-size: 24px;
+            margin-bottom: 20px;
+        }
+        h3 {
+            font-size: 16px;
+            margin: 0 0 10px 0;
+            color: #333;
+        }
+        h4 {
+            font-size: 14px;
+            margin: 10px 0;
+            color: #666;
+        }
+        .score {
+            font-size: 28px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .sleep-score { color: #4CAF50; }
+        .readiness-score { color: #2196F3; }
+        .activity-score { color: #FF9800; }
+        .data-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 15px;
+        }
+        .progress-bar {
+            background: #e0e0e0;
+            height: 6px;
+            border-radius: 3px;
+            margin-bottom: 15px;
+        }
+        .progress {
+            height: 100%;
+            border-radius: 3px;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        .sleep-progress { background: #4CAF50; }
+        .readiness-progress { background: #2196F3; }
+        .activity-progress { background: #FF9800; }
+        .phase-bar {
+            display: flex;
+            height: 20px;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        .phase-segment {
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            font-size: 12px;
+            transition: width 0.3s ease;
+        }
+        .deep-sleep { background-color: #1E88E5; }
+        .rem-sleep { background-color: #43A047; }
+        .light-sleep { background-color: #7CB342; }
+        .awake { background-color: #FFB300; }
+        .metric-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 10px;
+        }
+        .phase-legend {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            margin-top: 5px;
+            color: #666;
+        }
+        .metric-value {
+            color: #333;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="nav">
+            <a href="{{ url_for('admin_dashboard') }}">← Back to Admin Dashboard</a>
+            <a href="{{ url_for('dashboard') }}">My Dashboard</a>
+            <a href="{{ url_for('logout') }}">Logout</a>
+        </div>
+        
+        <div class="header">
+            <h1>User Data: {{ user.display_name }}</h1>
+            <select onchange="window.location.href=this.value">
+                {% for p in all_profiles %}
+                <option value="{{ url_for('view_user_data', user_id=p.id) }}" 
+                        {% if p.id == user.id %}selected{% endif %}>
+                    {{ p.display_name }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="data-section">
+            <h2>Sleep Data</h2>
+            <div class="data-grid">
+                {% for day in sleep_data.get('data', []) %}
+                <div class="card">
+                    <h3>{{ day.get('day', 'Unknown Date') }}</h3>
+                    <div class="score sleep-score">{{ day.get('score', 'N/A') }}</div>
+                    
+                    <!-- Sleep Phases -->
+                    {% set deep = day.get('deep_sleep_duration', 0) or 0 %}
+                    {% set rem = day.get('rem_sleep_duration', 0) or 0 %}
+                    {% set light = day.get('light_sleep_duration', 0) or 0 %}
+                    {% set awake = day.get('awake_time', 0) or 0 %}
+                    {% set total = deep + rem + light + awake %}
+                    
+                    {% if total > 0 %}
+                    <div class="metric-card">
+                        <h4>Sleep Phases</h4>
+                        <div class="phase-bar">
+                            {% set deep_pct = (deep * 100 / total) | round %}
+                            {% set rem_pct = (rem * 100 / total) | round %}
+                            {% set light_pct = (light * 100 / total) | round %}
+                            {% set awake_pct = (awake * 100 / total) | round %}
+                            
+                            {% if deep_pct > 0 %}
+                            <div class="phase-segment deep-sleep" style="width: {{ deep_pct }}%">
+                                {{ deep_pct }}%
+                            </div>
+                            {% endif %}
+                            {% if rem_pct > 0 %}
+                            <div class="phase-segment rem-sleep" style="width: {{ rem_pct }}%">
+                                {{ rem_pct }}%
+                            </div>
+                            {% endif %}
+                            {% if light_pct > 0 %}
+                            <div class="phase-segment light-sleep" style="width: {{ light_pct }}%">
+                                {{ light_pct }}%
+                            </div>
+                            {% endif %}
+                            {% if awake_pct > 0 %}
+                            <div class="phase-segment awake" style="width: {{ awake_pct }}%">
+                                {{ awake_pct }}%
+                            </div>
+                            {% endif %}
+                        </div>
+                        <div class="phase-legend">
+                            <span>Deep: {{ (deep / 60) | round }}min</span>
+                            <span>REM: {{ (rem / 60) | round }}min</span>
+                            <span>Light: {{ (light / 60) | round }}min</span>
+                            <span>Awake: {{ (awake / 60) | round }}min</span>
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    <!-- Sleep Metrics -->
+                    <div class="metric-card">
+                        <h4>Sleep Metrics</h4>
+                        <div>Total Sleep: <span class="metric-value">{{ (day.get('total_sleep_duration', 0) / 60) | round }} min</span></div>
+                        <div>Efficiency: <span class="metric-value">{{ day.get('efficiency', 'N/A') }}%</span></div>
+                        <div>Restless Periods: <span class="metric-value">{{ day.get('restless_periods', 'N/A') }}</span></div>
+                        {% if day.get('average_heart_rate') %}
+                        <div>Avg Heart Rate: <span class="metric-value">{{ day.get('average_heart_rate') }} bpm</span></div>
+                        {% endif %}
+                        {% if day.get('lowest_heart_rate') %}
+                        <div>Lowest Heart Rate: <span class="metric-value">{{ day.get('lowest_heart_rate') }} bpm</span></div>
+                        {% endif %}
+                        {% if day.get('average_hrv') %}
+                        <div>Average HRV: <span class="metric-value">{{ day.get('average_hrv') }} ms</span></div>
+                        {% endif %}
+                    </div>
+
+                    <!-- Sleep Timing -->
+                    {% if day.get('bedtime_start') or day.get('bedtime_end') %}
+                    <div class="metric-card">
+                        <h4>Sleep Timing</h4>
+                        {% if day.get('bedtime_start') %}
+                        <div>Bedtime: <span class="metric-value">{{ day.get('bedtime_start').split('T')[1][:5] }}</span></div>
+                        {% endif %}
+                        {% if day.get('bedtime_end') %}
+                        <div>Wake-up: <span class="metric-value">{{ day.get('bedtime_end').split('T')[1][:5] }}</span></div>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+
+                    <!-- Contributors -->
+                    {% if day.get('contributors') %}
+                    <div class="metric-card">
+                        <h4>Sleep Quality Factors</h4>
+                        {% for key, value in day.get('contributors', {}).items() %}
+                        <div>{{ key | replace('_', ' ') | title }}: <span class="metric-value">{{ value }}/100</span></div>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Readiness Data -->
+        <div class="data-section">
+            <h2>Readiness Data</h2>
+            <div class="data-grid">
+                {% for day in readiness_data.get('data', []) %}
+                <div class="card">
+                    <h3>{{ day.get('day', 'Unknown Date') }}</h3>
+                    <div class="score readiness-score">{{ day.get('score', 'N/A') }}</div>
+                    
+                    {% if day.get('contributors') %}
+                    <div class="metric-card">
+                        <h4>Contributors</h4>
+                        {% for key, value in day.get('contributors', {}).items() %}
+                        <div>{{ key | replace('_', ' ') | title }}: <span class="metric-value">{{ value }}</span></div>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Activity Data -->
+        <div class="data-section">
+            <h2>Activity Data</h2>
+            <div class="data-grid">
+                {% for day in activity_data.get('data', []) %}
+                <div class="card">
+                    <h3>{{ day.get('day', 'Unknown Date') }}</h3>
+                    <div class="score activity-score">{{ day.get('score', 'N/A') }}</div>
+                    
+                    <div class="metric-card">
+                        <h4>Activity Metrics</h4>
+                        <div>Steps: <span class="metric-value">{{ day.get('steps', 'N/A') }}</span></div>
+                        <div>Calories: <span class="metric-value">{{ day.get('calories', 'N/A') }}</span></div>
+                        {% if day.get('daily_movement') %}
+                        <div>Daily Movement: <span class="metric-value">{{ day.get('daily_movement') }} m</span></div>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</body>
+</html> 
