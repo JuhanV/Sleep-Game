@@ -39,26 +39,51 @@ cipher_suite = Fernet(fernet_key.encode() if isinstance(fernet_key, str) else fe
 # Oura OAuth2 configuration
 OURA_CLIENT_ID = os.getenv('OURA_CLIENT_ID')
 OURA_CLIENT_SECRET = os.getenv('OURA_CLIENT_SECRET')
-OURA_REDIRECT_URI = os.getenv('OURA_REDIRECT_URI', 'http://localhost:5000/callback')
+OURA_REDIRECT_URI = os.getenv('OURA_REDIRECT_URI', 'https://oura-oauth2-integration.onrender.com/callback')
 OURA_AUTH_URL = 'https://cloud.ouraring.com/oauth/authorize'
 OURA_TOKEN_URL = 'https://api.ouraring.com/oauth/token'
 
 # User class for Flask-Login
 class User(UserMixin):
-    def __init__(self, id, profile_data=None):
+    """User class for Flask-Login."""
+    def __init__(self, id, email, display_name, oura_tokens, is_admin=False):
         self.id = id
-        self.profile_data = profile_data
+        self.email = email
+        self.display_name = display_name
+        self._profile_data = None
+        self.oura_tokens = oura_tokens
+        self.is_admin = is_admin
+
+    @property
+    def profile_data(self):
+        """Get user's profile data from DB."""
+        if self._profile_data is None:
+            # Fetch from Supabase
+            response = supabase.table('profiles').select('*').eq('id', self.id).execute()
+            if response.data:
+                self._profile_data = response.data[0]
+            else:
+                self._profile_data = {}
+        return self._profile_data
 
 @login_manager.user_loader
 def load_user(user_id):
-    try:
-        profile = supabase.table('profiles').select('*').eq('id', user_id).execute()
-        if profile.data:
-            return User(user_id, profile.data[0])
+    """Load user from DB."""
+    response = supabase.table('profiles').select('*').eq('id', user_id).execute()
+    if not response.data:
         return None
-    except Exception as e:
-        print(f"Error loading user: {str(e)}")
-        return None
+    
+    user_data = response.data[0]
+    # Check for admin flag in the profiles table
+    is_admin_user = user_data.get('is_admin', False)
+    
+    return User(
+        id=user_data['id'],
+        email=user_data['email'],
+        display_name=user_data['display_name'],
+        oura_tokens=user_data.get('oura_tokens'),
+        is_admin=is_admin_user
+    )
 
 def encrypt_token(token):
     """Encrypt token using Fernet."""
@@ -233,7 +258,7 @@ def callback():
         # Login user
         if profile_id:
             profile_data = supabase.table('profiles').select('*').eq('id', profile_id).execute().data[0]
-            user = User(profile_id, profile_data)
+            user = User(profile_id, profile_data['email'], profile_data['display_name'], profile_data.get('oura_tokens'), profile_data.get('is_admin', False))
             login_user(user)
             return redirect(url_for('dashboard'))
         else:
@@ -1059,6 +1084,569 @@ def debug_data():
         
     except Exception as e:
         return f"An error occurred: {str(e)}", 500
+
+# Add an admin flag in the User class
+class User(UserMixin):
+    """User class for Flask-Login."""
+    def __init__(self, id, email, display_name, oura_tokens, is_admin=False):
+        self.id = id
+        self.email = email
+        self.display_name = display_name
+        self._profile_data = None
+        self.oura_tokens = oura_tokens
+        self.is_admin = is_admin
+
+    @property
+    def profile_data(self):
+        """Get user's profile data from DB."""
+        if self._profile_data is None:
+            # Fetch from Supabase
+            response = supabase.table('profiles').select('*').eq('id', self.id).execute()
+            if response.data:
+                self._profile_data = response.data[0]
+            else:
+                self._profile_data = {}
+        return self._profile_data
+
+# Add admin check function
+def is_admin():
+    """Check if current user is an admin."""
+    return current_user.is_authenticated and current_user.is_admin
+
+# Add an admin dashboard route
+@app.route('/admin')
+@login_required
+def admin_dashboard():
+    """Admin dashboard to view all users' data."""
+    # Verify admin permissions
+    if not is_admin():
+        flash("You don't have permission to access the admin dashboard.", "error")
+        return redirect(url_for('dashboard'))
+    
+    try:
+        # Get all profiles
+        all_profiles = supabase.table('profiles').select('*').execute()
+        
+        if not all_profiles.data:
+            flash("No users found in the database.", "error")
+            return redirect(url_for('dashboard'))
+        
+        return render_template_string('''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Admin Dashboard</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .user-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        .user-card {
+            background: white;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: transform 0.2s;
+        }
+        .user-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        .button {
+            display: inline-block;
+            padding: 8px 16px;
+            background-color: #6200EA;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+            transition: background-color 0.2s;
+        }
+        .button:hover {
+            background-color: #5000D6;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header a {
+            color: #666;
+            text-decoration: none;
+            margin-left: 15px;
+        }
+        .header a:hover {
+            color: #333;
+        }
+        .score {
+            font-size: 24px;
+            font-weight: bold;
+            color: #4CAF50;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="header">
+            <h1>Admin Dashboard</h1>
+            <div>
+                <a href="{{ url_for('dashboard') }}">My Dashboard</a>
+                <a href="{{ url_for('logout') }}">Logout</a>
+            </div>
+        </div>
+        
+        <h2>All Users</h2>
+        <div class="user-list">
+            {% for profile in profiles %}
+            <div class="user-card">
+                <h3>{{ profile.display_name }}</h3>
+                <p>Email: {{ profile.email }}</p>
+                <p>Average Sleep Score: <span class="score">{{ "%.1f"|format(profile.avg_sleep_score or 0) }}</span></p>
+                <p>Last Sleep Score: {{ profile.last_sleep_score or 'N/A' }}</p>
+                <p>Last Login: {{ profile.updated_at[:10] }}</p>
+                
+                <a href="{{ url_for('view_user_data', user_id=profile.id) }}" class="button">View Data</a>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</body>
+</html>
+        ''', profiles=all_profiles.data)
+    
+    except Exception as e:
+        print(f"Error in admin dashboard: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        flash(f"An error occurred: {str(e)}", "error")
+        return redirect(url_for('dashboard'))
+
+# Add a route to view individual user data as admin
+@app.route('/admin/user/<user_id>')
+@login_required
+def view_user_data(user_id):
+    """View specific user's data as admin."""
+    # Verify admin permissions
+    if not is_admin():
+        flash("You don't have permission to access other users' data.", "error")
+        return redirect(url_for('dashboard'))
+    
+    try:
+        # Get the specific user's profile
+        profile_response = supabase.table('profiles').select('*').eq('id', user_id).execute()
+        
+        if not profile_response.data:
+            flash("User not found.", "error")
+            return redirect(url_for('admin_dashboard'))
+        
+        profile = profile_response.data[0]
+        
+        # Get all profiles for dropdown
+        all_profiles = supabase.table('profiles').select('id, display_name').execute().data
+        
+        # Decrypt tokens
+        tokens = decrypt_token(profile['oura_tokens'])
+        if not tokens:
+            flash("Unable to decrypt user's Oura tokens.", "error")
+            return redirect(url_for('admin_dashboard'))
+        
+        access_token = tokens.get('access_token')
+        if not access_token:
+            flash("User's access token is missing.", "error")
+            return redirect(url_for('admin_dashboard'))
+        
+        # Define date range
+        start_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+        end_date = datetime.now().strftime('%Y-%m-%d')
+        
+        headers = {'Authorization': f"Bearer {access_token}"}
+        
+        # Fetch sleep data
+        sleep_data = {"data": []}
+        sleep_url = 'https://api.ouraring.com/v2/usercollection/daily_sleep'
+        sleep_params = {'start_date': start_date, 'end_date': end_date}
+        
+        try:
+            sleep_response = requests.get(sleep_url, headers=headers, params=sleep_params)
+            if sleep_response.status_code == 200:
+                sleep_data = sleep_response.json()
+                if not sleep_data.get("data"):
+                    sleep_data = {"data": []}
+                    for i in range(7):
+                        day_date = (datetime.now() - timedelta(days=6-i)).strftime('%Y-%m-%d')
+                        sleep_data["data"].append({
+                            "day": day_date,
+                            "score": 0,
+                            "total_sleep_duration": 0,
+                            "deep_sleep_duration": 0,
+                            "rem_sleep_duration": 0,
+                            "light_sleep_duration": 0
+                        })
+        except Exception as e:
+            print(f"Error fetching sleep data: {str(e)}")
+            
+        # Fetch readiness data
+        readiness_data = {"data": []}
+        readiness_url = 'https://api.ouraring.com/v2/usercollection/daily_readiness'
+        readiness_params = {'start_date': start_date, 'end_date': end_date}
+        
+        try:
+            readiness_response = requests.get(readiness_url, headers=headers, params=readiness_params)
+            if readiness_response.status_code == 200:
+                readiness_data = readiness_response.json()
+        except Exception as e:
+            print(f"Error fetching readiness data: {str(e)}")
+            
+        # Fetch activity data
+        activity_data = {"data": []}
+        activity_url = 'https://api.ouraring.com/v2/usercollection/daily_activity'
+        activity_params = {'start_date': start_date, 'end_date': end_date}
+        
+        try:
+            activity_response = requests.get(activity_url, headers=headers, params=activity_params)
+            if activity_response.status_code == 200:
+                activity_data = activity_response.json()
+        except Exception as e:
+            print(f"Error fetching activity data: {str(e)}")
+            
+        return render_template_string('''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ profile.display_name }}'s Data</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header-links {
+            display: flex;
+            gap: 15px;
+        }
+        .header a {
+            color: #666;
+            text-decoration: none;
+        }
+        .header a:hover {
+            color: #333;
+        }
+        .user-dropdown {
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            margin-right: 10px;
+        }
+        .data-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .score {
+            font-size: 24px;
+            font-weight: bold;
+        }
+        .sleep-score {
+            color: #4CAF50;
+        }
+        .readiness-score {
+            color: #2196F3;
+        }
+        .activity-score {
+            color: #FF9800;
+        }
+        .progress-bar {
+            background: #e0e0e0;
+            height: 10px;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        .progress {
+            height: 100%;
+            border-radius: 5px;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        .sleep-progress {
+            background: #4CAF50;
+        }
+        .readiness-progress {
+            background: #2196F3;
+        }
+        .activity-progress {
+            background: #FF9800;
+        }
+        .tab-container {
+            margin-bottom: 20px;
+        }
+        .tab {
+            display: inline-block;
+            padding: 10px 20px;
+            cursor: pointer;
+            background-color: #ddd;
+            border-radius: 5px 5px 0 0;
+            margin-right: 5px;
+        }
+        .tab.active {
+            background-color: white;
+            border-bottom: 2px solid #6200EA;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+    </style>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Initialize progress bars
+            function initProgressBar(id) {
+                document.querySelectorAll('.' + id).forEach(function(el) {
+                    setTimeout(function() {
+                        el.style.width = el.getAttribute('data-width') + '%';
+                    }, 100);
+                });
+            }
+            
+            initProgressBar('sleep-progress');
+            initProgressBar('readiness-progress');
+            initProgressBar('activity-progress');
+            
+            // Tab functionality
+            document.querySelectorAll('.tab').forEach(function(tab) {
+                tab.addEventListener('click', function() {
+                    // Remove active class from all tabs
+                    document.querySelectorAll('.tab').forEach(function(t) {
+                        t.classList.remove('active');
+                    });
+                    // Add active class to clicked tab
+                    this.classList.add('active');
+                    
+                    // Hide all tab content
+                    document.querySelectorAll('.tab-content').forEach(function(content) {
+                        content.classList.remove('active');
+                    });
+                    // Show corresponding content
+                    document.getElementById(this.getAttribute('data-tab')).classList.add('active');
+                });
+            });
+            
+            // User dropdown
+            document.getElementById('user-dropdown').addEventListener('change', function() {
+                window.location.href = "/admin/user/" + this.value;
+            });
+        });
+    </script>
+</head>
+<body>
+    <div class="card">
+        <div class="header">
+            <h1>{{ profile.display_name }}'s Data</h1>
+            <div class="header-links">
+                <select id="user-dropdown" class="user-dropdown">
+                    <option value="">Select User...</option>
+                    {% for p in all_profiles %}
+                    <option value="{{ p.id }}" {% if p.id == profile.id %}selected{% endif %}>{{ p.display_name }}</option>
+                    {% endfor %}
+                </select>
+                <a href="{{ url_for('admin_dashboard') }}">Admin Dashboard</a>
+                <a href="{{ url_for('dashboard') }}">My Dashboard</a>
+                <a href="{{ url_for('logout') }}">Logout</a>
+            </div>
+        </div>
+    </div>
+    
+    <div class="tab-container">
+        <div class="tab active" data-tab="sleep-tab">Sleep Data</div>
+        <div class="tab" data-tab="readiness-tab">Readiness Data</div>
+        <div class="tab" data-tab="activity-tab">Activity Data</div>
+    </div>
+    
+    <div id="sleep-tab" class="tab-content active">
+        <div class="card">
+            <h2>{{ profile.display_name }}'s Sleep Scores (Last 7 Days)</h2>
+            <p>Average Sleep Score: <span class="score sleep-score">{{ "%.1f"|format(profile.avg_sleep_score or 0) }}</span></p>
+            <div class="data-grid">
+                {% for day in sleep_data.get('data', []) %}
+                <div class="card">
+                    <h3>{{ day.get('day', 'Unknown Date') }}</h3>
+                    <div class="score sleep-score">{{ day.get('score', 'N/A') }}</div>
+                    <div class="progress-bar">
+                        <div class="progress sleep-progress" data-width="{{ day.get('score', 0) or 0 }}" style="width: 0%"></div>
+                    </div>
+                    
+                    <div style="margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px;">
+                        <h4>Sleep Details</h4>
+                        <ul style="padding-left: 0; list-style-type: none;">
+                            <li style="margin-bottom: 5px;"><strong>Score:</strong> {{ day.get('score', 'N/A') }}</li>
+                            {% if day.get('efficiency') is not none %}
+                            <li style="margin-bottom: 5px;"><strong>Efficiency:</strong> {{ day.get('efficiency') }}%</li>
+                            {% endif %}
+                            {% if day.get('total_sleep_duration') is not none %}
+                            <li style="margin-bottom: 5px;"><strong>Total Sleep:</strong> {% if day.get('total_sleep_duration') > 0 %}{{ day.get('total_sleep_duration') // 60 }} hours {{ day.get('total_sleep_duration') % 60 }} minutes{% else %}<span style="color: #999;">No data available</span>{% endif %}</li>
+                            {% endif %}
+                            {% if day.get('sleep_phase_durations') is not none and day.get('sleep_phase_durations').get('awake') is not none %}
+                            <li style="margin-bottom: 5px;"><strong>Awake Time:</strong> {{ day.get('sleep_phase_durations', {}).get('awake', 0) // 60 }} min {{ day.get('sleep_phase_durations', {}).get('awake', 0) % 60 }} sec</li>
+                            {% endif %}
+                            {% if day.get('latency') is not none %}
+                            <li style="margin-bottom: 5px;"><strong>Sleep Latency:</strong> {% if day.get('latency') > 0 %}{{ day.get('latency') // 60 }} min {{ day.get('latency') % 60 }} sec{% else %}<span style="color: #999;">No data available</span>{% endif %}</li>
+                            {% endif %}
+                            {% if day.get('sleep_phase_count') is not none %}
+                            <li style="margin-bottom: 5px;"><strong>Sleep Cycles:</strong> {{ day.get('sleep_phase_count') }}</li>
+                            {% endif %}
+                            {% if day.get('restless_periods') is not none %}
+                            <li style="margin-bottom: 5px;"><strong>Restless Periods:</strong> {{ day.get('restless_periods') }}</li>
+                            {% endif %}
+                        </ul>
+                    </div>
+                    
+                    {% if day.get('deep_sleep_duration') or day.get('rem_sleep_duration') or day.get('light_sleep_duration') or day.get('sleep_phase_durations') %}
+                    <div style="margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px;">
+                        <h4>Sleep Stages</h4>
+                        <ul style="padding-left: 0; list-style-type: none;">
+                            {% if day.get('deep_sleep_duration') %}
+                            <li style="margin-bottom: 5px;"><strong>Deep Sleep:</strong> {{ day.get('deep_sleep_duration') // 60 }} hours {{ day.get('deep_sleep_duration') % 60 }} minutes</li>
+                            {% elif day.get('sleep_phase_durations', {}).get('deep') %}
+                            <li style="margin-bottom: 5px;"><strong>Deep Sleep:</strong> {{ day.get('sleep_phase_durations', {}).get('deep', 0) // 60 }} min {{ day.get('sleep_phase_durations', {}).get('deep', 0) % 60 }} sec</li>
+                            {% endif %}
+                            
+                            {% if day.get('rem_sleep_duration') %}
+                            <li style="margin-bottom: 5px;"><strong>REM Sleep:</strong> {{ day.get('rem_sleep_duration') // 60 }} hours {{ day.get('rem_sleep_duration') % 60 }} minutes</li>
+                            {% elif day.get('sleep_phase_durations', {}).get('rem') %}
+                            <li style="margin-bottom: 5px;"><strong>REM Sleep:</strong> {{ day.get('sleep_phase_durations', {}).get('rem', 0) // 60 }} min {{ day.get('sleep_phase_durations', {}).get('rem', 0) % 60 }} sec</li>
+                            {% endif %}
+                            
+                            {% if day.get('light_sleep_duration') %}
+                            <li style="margin-bottom: 5px;"><strong>Light Sleep:</strong> {{ day.get('light_sleep_duration') // 60 }} hours {{ day.get('light_sleep_duration') % 60 }} minutes</li>
+                            {% elif day.get('sleep_phase_durations', {}).get('light') %}
+                            <li style="margin-bottom: 5px;"><strong>Light Sleep:</strong> {{ day.get('sleep_phase_durations', {}).get('light', 0) // 60 }} min {{ day.get('sleep_phase_durations', {}).get('light', 0) % 60 }} sec</li>
+                            {% endif %}
+                        </ul>
+                        
+                        {% if day.get('sleep_phase_percentage') %}
+                        <div style="margin-top: 10px;">
+                            <h5>Sleep Composition</h5>
+                            <div style="display: flex; height: 20px; border-radius: 3px; overflow: hidden;">
+                                {% if day.get('sleep_phase_percentage', {}).get('deep') %}
+                                <div style="background: #1E88E5; width: {{ day.get('sleep_phase_percentage', {}).get('deep', 0) }}%; display: flex; justify-content: center; align-items: center; color: white; font-size: 10px;">{{ day.get('sleep_phase_percentage', {}).get('deep', 0) }}%</div>
+                                {% endif %}
+                                {% if day.get('sleep_phase_percentage', {}).get('rem') %}
+                                <div style="background: #43A047; width: {{ day.get('sleep_phase_percentage', {}).get('rem', 0) }}%; display: flex; justify-content: center; align-items: center; color: white; font-size: 10px;">{{ day.get('sleep_phase_percentage', {}).get('rem', 0) }}%</div>
+                                {% endif %}
+                                {% if day.get('sleep_phase_percentage', {}).get('light') %}
+                                <div style="background: #7CB342; width: {{ day.get('sleep_phase_percentage', {}).get('light', 0) }}%; display: flex; justify-content: center; align-items: center; color: white; font-size: 10px;">{{ day.get('sleep_phase_percentage', {}).get('light', 0) }}%</div>
+                                {% endif %}
+                            </div>
+                            <div style="display: flex; justify-content: space-between; font-size: 10px; margin-top: 3px;">
+                                <span style="color: #1E88E5;">Deep</span>
+                                <span style="color: #43A047;">REM</span>
+                                <span style="color: #7CB342;">Light</span>
+                            </div>
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+    
+    <div id="readiness-tab" class="tab-content">
+        <div class="card">
+            <h2>{{ profile.display_name }}'s Readiness Scores (Last 7 Days)</h2>
+            <div class="data-grid">
+                {% for day in readiness_data.get('data', []) %}
+                <div class="card">
+                    <h3>{{ day.get('day', 'Unknown Date') }}</h3>
+                    <div class="score readiness-score">{{ day.get('score', 'N/A') }}</div>
+                    <div class="progress-bar">
+                        <div class="progress readiness-progress" data-width="{{ day.get('score', 0) or 0 }}" style="width: 0%"></div>
+                    </div>
+                    
+                    {% if day.get('contributors') %}
+                    <div style="margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px;">
+                        <h4>Contributors</h4>
+                        <ul style="padding-left: 0; list-style-type: none;">
+                            {% for key, value in day.get('contributors', {}).items() %}
+                            <li style="margin-bottom: 5px;"><strong>{{ key|replace('_', ' ')|title }}:</strong> {{ value }}</li>
+                            {% endfor %}
+                        </ul>
+                    </div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+    
+    <div id="activity-tab" class="tab-content">
+        <div class="card">
+            <h2>{{ profile.display_name }}'s Activity Scores (Last 7 Days)</h2>
+            <div class="data-grid">
+                {% for day in activity_data.get('data', []) %}
+                <div class="card">
+                    <h3>{{ day.get('day', 'Unknown Date') }}</h3>
+                    <div class="score activity-score">{{ day.get('score', 'N/A') }}</div>
+                    <div class="progress-bar">
+                        <div class="progress activity-progress" data-width="{{ day.get('score', 0) or 0 }}" style="width: 0%"></div>
+                    </div>
+                    <div style="margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px;">
+                        <ul style="padding-left: 0; list-style-type: none;">
+                            {% if day.get('steps') %}
+                            <li style="margin-bottom: 5px;"><strong>Steps:</strong> {{ day.get('steps', 'N/A') }}</li>
+                            {% endif %}
+                            {% if day.get('active_calories') %}
+                            <li style="margin-bottom: 5px;"><strong>Active Calories:</strong> {{ day.get('active_calories', 'N/A') }}</li>
+                            {% endif %}
+                            {% if day.get('total_calories') %}
+                            <li style="margin-bottom: 5px;"><strong>Total Calories:</strong> {{ day.get('total_calories', 'N/A') }}</li>
+                            {% endif %}
+                        </ul>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+        ''', profile=profile, all_profiles=all_profiles, sleep_data=sleep_data, readiness_data=readiness_data, activity_data=activity_data)
+        
+    except Exception as e:
+        print(f"Error in view_user_data: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        flash(f"An error occurred: {str(e)}", "error")
+        return redirect(url_for('admin_dashboard'))
 
 if __name__ == '__main__':
     app.run(debug=True) 
