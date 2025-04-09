@@ -1,14 +1,27 @@
-from flask import Flask, request, redirect, url_for, session, render_template_string, flash
-from flask_login import LoginManager, UserMixin, login_required, login_user, logout_user, current_user
-from datetime import datetime, timedelta
-import requests
+# Standard library imports
 import os
 import json
+import base64
+import uuid
+import traceback  # <<< ADD THIS IMPORT
+from datetime import datetime, timedelta
+
+# Third-party imports
+from flask import (
+    Flask,
+    request,
+    redirect,
+    url_for,
+    session,
+    render_template_string,
+    render_template,
+    flash
+)
+from flask_login import LoginManager, UserMixin, login_required, login_user, logout_user, current_user
+import requests
 from dotenv import load_dotenv
 from supabase import create_client
 from cryptography.fernet import Fernet
-import base64
-import uuid
 
 # Load environment variables
 load_dotenv()
@@ -101,6 +114,9 @@ def decrypt_token(encrypted_token_str):
     """Decrypt an encrypted token string."""
     try:
         print(f"decrypt_token: Starting decryption of token (length: {len(encrypted_token_str) if encrypted_token_str else 0})")
+        print(f"decrypt_token: First 10 chars of token: {encrypted_token_str[:10] if encrypted_token_str else 'None'}")
+        print(f"decrypt_token: Fernet key length: {len(fernet_key) if fernet_key else 0}")
+        print(f"decrypt_token: First 10 chars of Fernet key: {fernet_key[:10] if fernet_key else 'None'}")
         
         if not encrypted_token_str:
             print("decrypt_token: Empty token string provided")
@@ -112,30 +128,52 @@ def decrypt_token(encrypted_token_str):
             try:
                 # First try UTF-8 encoding
                 token_bytes = encrypted_token_str.encode('utf-8')
+                print(f"decrypt_token: Successfully encoded token using UTF-8, length: {len(token_bytes)}")
             except UnicodeEncodeError:
                 print("decrypt_token: UTF-8 encoding failed, trying latin-1")
                 token_bytes = encrypted_token_str.encode('latin-1')
+                print(f"decrypt_token: Successfully encoded token using latin-1, length: {len(token_bytes)}")
         else:
             token_bytes = encrypted_token_str
+            print(f"decrypt_token: Token was already bytes, length: {len(token_bytes)}")
             
         print(f"decrypt_token: Token bytes length: {len(token_bytes)}")
         
         # Initialize Fernet with the key
-        f = Fernet(fernet_key)
+        try:
+            print("decrypt_token: Initializing Fernet with key")
+            key_bytes = fernet_key.encode() if isinstance(fernet_key, str) else fernet_key
+            print(f"decrypt_token: Key bytes length: {len(key_bytes)}")
+            f = Fernet(key_bytes)
+            print("decrypt_token: Successfully initialized Fernet")
+        except Exception as e:
+            print(f"decrypt_token: Error initializing Fernet: {str(e)}")
+            print(f"decrypt_token: Error type: {type(e).__name__}")
+            return None
         
         # Decrypt the token
         print("decrypt_token: Attempting decryption")
-        decrypted_token = f.decrypt(token_bytes)
-        print("decrypt_token: Decryption successful")
+        try:
+            decrypted_token = f.decrypt(token_bytes)
+            print("decrypt_token: Decryption successful")
+        except Exception as e:
+            print(f"decrypt_token: Error during decryption: {str(e)}")
+            print(f"decrypt_token: Error type: {type(e).__name__}")
+            return None
         
         # Parse the JSON
         print("decrypt_token: Parsing JSON")
-        tokens = json.loads(decrypted_token)
-        print("decrypt_token: JSON parsing successful")
-        
-        return tokens
+        try:
+            tokens = json.loads(decrypted_token)
+            print("decrypt_token: JSON parsing successful")
+            return tokens
+        except json.JSONDecodeError as e:
+            print(f"decrypt_token: JSON parsing failed: {str(e)}")
+            print(f"decrypt_token: Decrypted content: {decrypted_token}")
+            return None
+            
     except Exception as e:
-        print(f"decrypt_token: Error during decryption: {str(e)}")
+        print(f"decrypt_token: Unexpected error: {str(e)}")
         print(f"decrypt_token: Error type: {type(e).__name__}")
         import traceback
         print(f"decrypt_token: Traceback: {traceback.format_exc()}")
@@ -688,62 +726,49 @@ def dashboard():
                         </ul>
                     </div>
                     
-                    {% if day.get('deep_sleep_duration') or day.get('rem_sleep_duration') or day.get('light_sleep_duration') or day.get('sleep_phase_durations') %}
-                    <div style="margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px;">
-                        <h4>Sleep Stages</h4>
-                        <ul style="padding-left: 0; list-style-type: none;">
-                            {% if day.get('deep_sleep_duration') %}
-                            <li style="margin-bottom: 5px;"><strong>Deep Sleep:</strong> {{ day.get('deep_sleep_duration') // 60 }} hours {{ day.get('deep_sleep_duration') % 60 }} minutes</li>
-                            {% elif day.get('sleep_phase_durations', {}).get('deep') %}
-                            <li style="margin-bottom: 5px;"><strong>Deep Sleep:</strong> {{ day.get('sleep_phase_durations', {}).get('deep', 0) // 60 }} min {{ day.get('sleep_phase_durations', {}).get('deep', 0) % 60 }} sec</li>
-                            {% endif %}
+                    <!-- Sleep Phases -->
+                    {% set deep = day.get('deep_sleep_duration', 0) or 0 %}
+                    {% set rem = day.get('rem_sleep_duration', 0) or 0 %}
+                    {% set light = day.get('light_sleep_duration', 0) or 0 %}
+                    {% set awake = day.get('awake_time', 0) or 0 %}
+                    {% set total = deep + rem + light + awake %}
+                    
+                    {% if total > 0 %}
+                    <div class="metric-card">
+                        <h4>Sleep Phases</h4>
+                        <div class="phase-bar">
+                            {% set deep_pct = (deep * 100 / total) | round %}
+                            {% set rem_pct = (rem * 100 / total) | round %}
+                            {% set light_pct = (light * 100 / total) | round %}
+                            {% set awake_pct = (awake * 100 / total) | round %}
                             
-                            {% if day.get('rem_sleep_duration') %}
-                            <li style="margin-bottom: 5px;"><strong>REM Sleep:</strong> {{ day.get('rem_sleep_duration') // 60 }} hours {{ day.get('rem_sleep_duration') % 60 }} minutes</li>
-                            {% elif day.get('sleep_phase_durations', {}).get('rem') %}
-                            <li style="margin-bottom: 5px;"><strong>REM Sleep:</strong> {{ day.get('sleep_phase_durations', {}).get('rem', 0) // 60 }} min {{ day.get('sleep_phase_durations', {}).get('rem', 0) % 60 }} sec</li>
-                            {% endif %}
-                            
-                            {% if day.get('light_sleep_duration') %}
-                            <li style="margin-bottom: 5px;"><strong>Light Sleep:</strong> {{ day.get('light_sleep_duration') // 60 }} hours {{ day.get('light_sleep_duration') % 60 }} minutes</li>
-                            {% elif day.get('sleep_phase_durations', {}).get('light') %}
-                            <li style="margin-bottom: 5px;"><strong>Light Sleep:</strong> {{ day.get('sleep_phase_durations', {}).get('light', 0) // 60 }} min {{ day.get('sleep_phase_durations', {}).get('light', 0) % 60 }} sec</li>
-                            {% endif %}
-                            
-                            {% if day.get('awake_duration') %}
-                            <li style="margin-bottom: 5px;"><strong>Time Awake:</strong> {{ day.get('awake_duration') // 60 }} hours {{ day.get('awake_duration') % 60 }} minutes</li>
-                            {% endif %}
-                            
-                            {% if day.get('sleep_phase_durations', {}).get('out') is not none %}
-                            <li style="margin-bottom: 5px;"><strong>Out of Bed:</strong> {{ day.get('sleep_phase_durations', {}).get('out', 0) // 60 }} min {{ day.get('sleep_phase_durations', {}).get('out', 0) % 60 }} sec</li>
-                            {% endif %}
-                        </ul>
-
-                        {% if day.get('sleep_phase_percentage') %}
-                        <div style="margin-top: 10px;">
-                            <h5>Sleep Composition</h5>
-                            <div style="display: flex; height: 20px; border-radius: 3px; overflow: hidden;">
-                                {% if day.get('sleep_phase_percentage', {}).get('deep') %}
-                                <div style="background: #1E88E5; width: {{ day.get('sleep_phase_percentage', {}).get('deep', 0) }}%; display: flex; justify-content: center; align-items: center; color: white; font-size: 10px;">{{ day.get('sleep_phase_percentage', {}).get('deep', 0) }}%</div>
-                                {% endif %}
-                                {% if day.get('sleep_phase_percentage', {}).get('rem') %}
-                                <div style="background: #43A047; width: {{ day.get('sleep_phase_percentage', {}).get('rem', 0) }}%; display: flex; justify-content: center; align-items: center; color: white; font-size: 10px;">{{ day.get('sleep_phase_percentage', {}).get('rem', 0) }}%</div>
-                                {% endif %}
-                                {% if day.get('sleep_phase_percentage', {}).get('light') %}
-                                <div style="background: #7CB342; width: {{ day.get('sleep_phase_percentage', {}).get('light', 0) }}%; display: flex; justify-content: center; align-items: center; color: white; font-size: 10px;">{{ day.get('sleep_phase_percentage', {}).get('light', 0) }}%</div>
-                                {% endif %}
-                                {% if day.get('sleep_phase_percentage', {}).get('awake') %}
-                                <div style="background: #FFB300; width: {{ day.get('sleep_phase_percentage', {}).get('awake', 0) }}%; display: flex; justify-content: center; align-items: center; color: white; font-size: 10px;">{{ day.get('sleep_phase_percentage', {}).get('awake', 0) }}%</div>
-                                {% endif %}
+                            {% if deep_pct > 0 %}
+                            <div class="phase-segment deep-sleep" style="width: {{ deep_pct }}%">
+                                {{ deep_pct }}%
                             </div>
-                            <div style="display: flex; justify-content: space-between; font-size: 10px; margin-top: 3px;">
-                                <span style="color: #1E88E5;">Deep</span>
-                                <span style="color: #43A047;">REM</span>
-                                <span style="color: #7CB342;">Light</span>
-                                <span style="color: #FFB300;">Awake</span>
+                            {% endif %}
+                            {% if rem_pct > 0 %}
+                            <div class="phase-segment rem-sleep" style="width: {{ rem_pct }}%">
+                                {{ rem_pct }}%
                             </div>
+                            {% endif %}
+                            {% if light_pct > 0 %}
+                            <div class="phase-segment light-sleep" style="width: {{ light_pct }}%">
+                                {{ light_pct }}%
+                            </div>
+                            {% endif %}
+                            {% if awake_pct > 0 %}
+                            <div class="phase-segment awake" style="width: {{ awake_pct }}%">
+                                {{ awake_pct }}%
+                            </div>
+                            {% endif %}
                         </div>
-                        {% endif %}
+                        <div class="phase-legend">
+                            <span>Deep: {{ (deep / 60) | round }}min</span>
+                            <span>REM: {{ (rem / 60) | round }}min</span>
+                            <span>Light: {{ (light / 60) | round }}min</span>
+                            <span>Awake: {{ (awake / 60) | round }}min</span>
+                        </div>
                     </div>
                     {% endif %}
                     
@@ -953,7 +978,6 @@ def dashboard():
 
     except Exception as e:
         print(f"Unhandled Error in dashboard route: {str(e)}")
-        import traceback
         traceback.print_exc()
         flash(f"An unexpected error occurred in the dashboard: {str(e)}", "error")
         return redirect(url_for('index'))
@@ -1259,92 +1283,152 @@ def admin_dashboard():
 
     except Exception as e:
         print(f"Error in admin dashboard logic: {str(e)}")
-        import traceback
         traceback.print_exc()
         flash(f"An error occurred loading the admin dashboard: {str(e)}", "error")
         return redirect(url_for('dashboard'))
 
-# Add a route to view individual user data as admin
 @app.route('/admin/user/<user_id>')
 @login_required
 def view_user_data(user_id):
+    """View detailed data for a specific user."""
     print(f"\n--- Entering view_user_data for target user_id: {user_id} ---")
+
+    # Initialize data containers
+    sleep_data = {"data": []}
+    readiness_data = {"data": []}
+    activity_data = {"data": []}
+    profile = None
+    all_profiles = None
+
     # Check 1: Is the current user admin?
-    is_requesting_user_admin = getattr(current_user, 'is_admin', False)
-    print(f"view_user_data: Admin check result: {is_requesting_user_admin}")
-    if not is_requesting_user_admin:
+    if not current_user.is_admin:
         flash("You don't have permission to access other users' data.", "error")
         return redirect(url_for('dashboard'))
 
     try:
         # Check 2: Does the target user exist?
         print(f"view_user_data: Fetching profile for {user_id}")
-        profile_response = supabase.table('profiles').select('*').eq('id', user_id).execute()
-        if not profile_response.data:
+        user_profile = supabase.table('profiles').select('*').eq('id', user_id).execute()
+        if not user_profile.data:
             print(f"view_user_data: Profile not found for {user_id}. Redirecting.")
             flash("User not found.", "error")
             return redirect(url_for('admin_dashboard'))
 
-        profile = profile_response.data[0]
+        profile = user_profile.data[0]
         print(f"view_user_data: Found profile for {profile.get('display_name')}")
-        all_profiles = supabase.table('profiles').select('id, display_name').execute().data
+        
+        # Get all profiles for the dropdown
+        all_profiles = supabase.table('profiles').select('*').execute()
 
-        # Check 3: Can tokens be decrypted?
-        print(f"view_user_data: Decrypting tokens for {profile.get('display_name')}")
+        # Step 3: Decrypt Token
+        print(f"view_user_data: Attempting to decrypt tokens for {profile.get('display_name')}")
         encrypted_token_str = profile.get('oura_tokens')
-        print(f"view_user_data: Raw token from DB: {encrypted_token_str[:30]}... (length: {len(encrypted_token_str) if encrypted_token_str else 0})")
+        tokens = None
         
         if not encrypted_token_str:
-            print("view_user_data: Encrypted token string is missing/null in DB. Redirecting.")
-            flash("User profile is missing Oura token data.", "error")
+            print("view_user_data: Encrypted token string is missing/null in DB")
+            flash("User's Oura tokens are missing.", "error")
             return redirect(url_for('admin_dashboard'))
 
-        # Try to decrypt the token directly first
+        # Try to decrypt the token
         try:
             tokens = decrypt_token(encrypted_token_str)
-            if tokens:
-                print("view_user_data: Successfully decrypted token directly")
-                return render_template('admin/user_data.html', 
-                                    user=profile,
-                                    sleep_data=sleep_data,
-                                    readiness_data=readiness_data,
-                                    activity_data=activity_data)
+            if not tokens:
+                print("view_user_data: Initial decryption failed")
+                # Try cleaning the token
+                clean_token = encrypted_token_str.strip()
+                tokens = decrypt_token(clean_token)
+                if not tokens:
+                    print("view_user_data: Cleaned token decryption also failed")
+                    flash("Failed to decrypt user's Oura tokens.", "error")
+                    return redirect(url_for('admin_dashboard'))
         except Exception as e:
-            print(f"view_user_data: Direct decryption failed: {str(e)}")
-            print(f"view_user_data: Error type: {type(e).__name__}")
-            import traceback
-            print(f"view_user_data: Traceback: {traceback.format_exc()}")
+            print(f"view_user_data: Token decryption failed: {str(e)}")
+            flash("Error decrypting Oura tokens.", "error")
+            return redirect(url_for('admin_dashboard'))
 
-        # If direct decryption fails, try to handle the token format
+        # Check if we have an access token
+        access_token = tokens.get('access_token')
+        if not access_token:
+            print("view_user_data: No access token in decrypted data")
+            flash("Access token is missing from decrypted data.", "error")
+            return redirect(url_for('admin_dashboard'))
+
+        print("view_user_data: Successfully obtained access token")
+
+        # Step 4: Fetch Oura Data
+        end_date = datetime.now()
+        start_date = (end_date - timedelta(days=7)).strftime('%Y-%m-%d')
+        end_date = end_date.strftime('%Y-%m-%d')
+        
+        headers = {'Authorization': f"Bearer {access_token}"}
+        
+        # Fetch sleep data
         try:
-            # Remove any potential padding or extra characters
-            clean_token = encrypted_token_str.strip()
-            print(f"view_user_data: Cleaned token: {clean_token[:30]}...")
-            
-            # Try to decrypt the cleaned token
-            tokens = decrypt_token(clean_token)
-            if tokens:
-                print("view_user_data: Successfully decrypted cleaned token")
-                return render_template('admin/user_data.html', 
-                                    user=profile,
-                                    sleep_data=sleep_data,
-                                    readiness_data=readiness_data,
-                                    activity_data=activity_data)
+            print("view_user_data: Fetching sleep data")
+            sleep_response = requests.get(
+                'https://api.ouraring.com/v2/usercollection/daily_sleep',
+                headers=headers,
+                params={'start_date': start_date, 'end_date': end_date},
+                timeout=10
+            )
+            if sleep_response.status_code == 200:
+                sleep_data = sleep_response.json()
+                print(f"view_user_data: Sleep data fetched successfully")
+            else:
+                print(f"view_user_data: Sleep API request failed with status {sleep_response.status_code}")
         except Exception as e:
-            print(f"view_user_data: Cleaned token decryption failed: {str(e)}")
-            print(f"view_user_data: Error type: {type(e).__name__}")
-            print(f"view_user_data: Traceback: {traceback.format_exc()}")
-
-        print(f"view_user_data: All decryption attempts failed for {profile.get('display_name')}. Redirecting.")
-        flash("Unable to decrypt user's Oura tokens.", "error")
-        return redirect(url_for('admin_dashboard'))
+            print(f"view_user_data: Error fetching sleep data: {str(e)}")
+            
+        # Fetch readiness data
+        try:
+            print("view_user_data: Fetching readiness data")
+            readiness_response = requests.get(
+                'https://api.ouraring.com/v2/usercollection/daily_readiness',
+                headers=headers,
+                params={'start_date': start_date, 'end_date': end_date},
+                timeout=10
+            )
+            if readiness_response.status_code == 200:
+                readiness_data = readiness_response.json()
+                print(f"view_user_data: Readiness data fetched successfully")
+            else:
+                print(f"view_user_data: Readiness API request failed with status {readiness_response.status_code}")
+        except Exception as e:
+            print(f"view_user_data: Error fetching readiness data: {str(e)}")
+            
+        # Fetch activity data
+        try:
+            print("view_user_data: Fetching activity data")
+            activity_response = requests.get(
+                'https://api.ouraring.com/v2/usercollection/daily_activity',
+                headers=headers,
+                params={'start_date': start_date, 'end_date': end_date},
+                timeout=10
+            )
+            if activity_response.status_code == 200:
+                activity_data = activity_response.json()
+                print(f"view_user_data: Activity data fetched successfully")
+            else:
+                print(f"view_user_data: Activity API request failed with status {activity_response.status_code}")
+        except Exception as e:
+            print(f"view_user_data: Error fetching activity data: {str(e)}")
 
     except Exception as e:
-        print(f"Error in view_user_data for user {user_id}: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        flash(f"An error occurred viewing user {profile.get('display_name', user_id)}: {str(e)}", "error")
+        print(f"view_user_data: Unexpected error: {str(e)}")
+        flash("An unexpected error occurred.", "error")
         return redirect(url_for('admin_dashboard'))
+
+    print("view_user_data: All data fetched, rendering template")
+    
+    # Step 5: Render template with all collected data
+    return render_template('admin/user_data.html',
+        user=profile,
+        all_profiles=all_profiles.data,
+        sleep_data=sleep_data,
+        readiness_data=readiness_data,
+        activity_data=activity_data
+    )
 
 @app.route('/debug_admin')
 def debug_admin():
