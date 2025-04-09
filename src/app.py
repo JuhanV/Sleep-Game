@@ -39,7 +39,15 @@ cipher_suite = Fernet(fernet_key.encode() if isinstance(fernet_key, str) else fe
 # Oura OAuth2 configuration
 OURA_CLIENT_ID = os.getenv('OURA_CLIENT_ID')
 OURA_CLIENT_SECRET = os.getenv('OURA_CLIENT_SECRET')
-OURA_REDIRECT_URI = os.getenv('OURA_REDIRECT_URI', 'https://oura-oauth2-integration.onrender.com/callback')
+
+# Define possible redirect URIs
+LOCAL_URI = 'http://localhost:5000/callback'
+PRODUCTION_URI = 'https://oura-oauth2-integration.onrender.com/callback'
+
+# Get the environment-specific redirect URI or use local as default
+ENVIRONMENT = os.getenv('FLASK_ENV', 'development')
+OURA_REDIRECT_URI = os.getenv('OURA_REDIRECT_URI', PRODUCTION_URI if ENVIRONMENT == 'production' else LOCAL_URI)
+
 OURA_AUTH_URL = 'https://cloud.ouraring.com/oauth/authorize'
 OURA_TOKEN_URL = 'https://api.ouraring.com/oauth/token'
 
@@ -72,18 +80,18 @@ def load_user(user_id):
     response = supabase.table('profiles').select('*').eq('id', user_id).execute()
     if not response.data:
         return None
-    
+
     user_data = response.data[0]
-    # Check for admin flag in the profiles table
     is_admin_user = user_data.get('is_admin', False)
-    
-    return User(
+
+    user_obj = User(
         id=user_data['id'],
         email=user_data['email'],
         display_name=user_data['display_name'],
         oura_tokens=user_data.get('oura_tokens'),
         is_admin=is_admin_user
     )
+    return user_obj
 
 def encrypt_token(token):
     """Encrypt token using Fernet."""
@@ -1085,44 +1093,30 @@ def debug_data():
     except Exception as e:
         return f"An error occurred: {str(e)}", 500
 
-# Add an admin flag in the User class
-class User(UserMixin):
-    """User class for Flask-Login."""
-    def __init__(self, id, email, display_name, oura_tokens, is_admin=False):
-        self.id = id
-        self.email = email
-        self.display_name = display_name
-        self._profile_data = None
-        self.oura_tokens = oura_tokens
-        self.is_admin = is_admin
-
-    @property
-    def profile_data(self):
-        """Get user's profile data from DB."""
-        if self._profile_data is None:
-            # Fetch from Supabase
-            response = supabase.table('profiles').select('*').eq('id', self.id).execute()
-            if response.data:
-                self._profile_data = response.data[0]
-            else:
-                self._profile_data = {}
-        return self._profile_data
-
 # Add admin check function
 def is_admin():
-    """Check if current user is an admin."""
-    return current_user.is_authenticated and current_user.is_admin
+    """Check if current user is an admin based SOLELY on the loaded user object."""
+    print("--- Entering is_admin() check ---")
+    if not current_user.is_authenticated:
+        print("is_admin(): User not authenticated, returning False")
+        return False
+    # Use getattr for safety in case the attribute doesn't exist for some reason
+    admin_status = getattr(current_user, 'is_admin', False)
+    print(f"is_admin(): getattr(current_user, 'is_admin', False) resolved to: {admin_status}")
+    print("--- Exiting is_admin() check ---")
+    return admin_status
 
 # Add an admin dashboard route
 @app.route('/admin')
 @login_required
 def admin_dashboard():
     """Admin dashboard to view all users' data."""
-    # Verify admin permissions
-    if not is_admin():
+    # Direct check
+    is_user_admin = getattr(current_user, 'is_admin', False)
+    if not is_user_admin:
         flash("You don't have permission to access the admin dashboard.", "error")
         return redirect(url_for('dashboard'))
-    
+
     try:
         # Get all profiles
         all_profiles = supabase.table('profiles').select('*').execute()
@@ -1216,7 +1210,7 @@ def admin_dashboard():
                 <p>Email: {{ profile.email }}</p>
                 <p>Average Sleep Score: <span class="score">{{ "%.1f"|format(profile.avg_sleep_score or 0) }}</span></p>
                 <p>Last Sleep Score: {{ profile.last_sleep_score or 'N/A' }}</p>
-                <p>Last Login: {{ profile.updated_at[:10] }}</p>
+                <p>Last Login: {{ profile.updated_at[:10] if profile.updated_at else 'Never' }}</p>
                 
                 <a href="{{ url_for('view_user_data', user_id=profile.id) }}" class="button">View Data</a>
             </div>
@@ -1226,21 +1220,21 @@ def admin_dashboard():
 </body>
 </html>
         ''', profiles=all_profiles.data)
-    
+
     except Exception as e:
-        print(f"Error in admin dashboard: {str(e)}")
+        print(f"Error in admin dashboard logic: {str(e)}")
         import traceback
         traceback.print_exc()
-        flash(f"An error occurred: {str(e)}", "error")
+        flash(f"An error occurred loading the admin dashboard: {str(e)}", "error")
         return redirect(url_for('dashboard'))
 
 # Add a route to view individual user data as admin
 @app.route('/admin/user/<user_id>')
 @login_required
 def view_user_data(user_id):
-    """View specific user's data as admin."""
-    # Verify admin permissions
-    if not is_admin():
+    # Verify admin permissions using direct check
+    is_requesting_user_admin = getattr(current_user, 'is_admin', False)
+    if not is_requesting_user_admin:
         flash("You don't have permission to access other users' data.", "error")
         return redirect(url_for('dashboard'))
     
@@ -1647,6 +1641,49 @@ def view_user_data(user_id):
         traceback.print_exc()
         flash(f"An error occurred: {str(e)}", "error")
         return redirect(url_for('admin_dashboard'))
+
+@app.route('/debug_admin')
+def debug_admin():
+    """Debug route to check admin status."""
+    if not current_user.is_authenticated:
+        return "Not logged in"
+    
+    # Check if user is admin
+    admin_status = current_user.is_admin if hasattr(current_user, 'is_admin') else False
+    
+    # Get current user's profile from Supabase
+    response = supabase.table('profiles').select('*').eq('id', current_user.id).execute()
+    db_is_admin = False
+    if response.data:
+        db_is_admin = response.data[0].get('is_admin', False)
+    
+    return f"""
+    <h1>Admin Debug</h1>
+    <p>User ID: {current_user.id}</p>
+    <p>Email: {current_user.email}</p>
+    <p>current_user.is_admin: {admin_status}</p>
+    <p>Database is_admin: {db_is_admin}</p>
+    <p>User Class: {type(current_user).__name__}</p>
+    <p><a href="/dashboard">Go to Dashboard</a></p>
+    """
+
+@app.route('/make_admin/<user_id>')
+@login_required
+def make_admin(user_id):
+    """Make a user an admin (only accessible by existing admins)."""
+    # Only allow existing admins to make others admin
+    if not is_admin():
+        flash("You don't have permission to perform this action.", "error")
+        return redirect(url_for('dashboard'))
+    
+    try:
+        # Update the user's profile in Supabase
+        supabase.table('profiles').update({'is_admin': True}).eq('id', user_id).execute()
+        flash("User has been granted admin privileges.", "success")
+    except Exception as e:
+        flash(f"Error making user admin: {str(e)}", "error")
+    
+    return redirect(url_for('admin_dashboard'))
 
 if __name__ == '__main__':
     app.run(debug=True) 
